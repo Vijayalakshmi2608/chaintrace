@@ -49,6 +49,7 @@ async def run() -> None:
                 assert first.status_code == 200
                 first_payload = first.json()
                 assert first_payload["cache"] == "MISS"
+                assert first_payload["investigationId"].startswith("CT-")
                 assert first_payload["metrics"]["sources"] == 1
                 assert first_payload["metrics"]["relationships"] == 1
                 assert first_payload["edges"][0]["data"]["evidence_ids"] == [first_payload["evidence"][0]["id"]]
@@ -58,6 +59,19 @@ async def run() -> None:
                 second = await client.post("/api/investigate", json={"query": "normal query"})
                 assert second.status_code == 200 and second.json()["cache"] == "HIT"
                 assert serp_calls == serp_before_cache and extraction_calls == extraction_before_cache
+
+                recent = await client.get("/api/investigations")
+                assert recent.status_code == 200
+                assert recent.json()["investigations"][0]["investigationId"] == first_payload["investigationId"]
+                reopened = await client.get(f"/api/investigations/{first_payload['investigationId']}")
+                assert reopened.status_code == 200 and reopened.json()["cache"] == "HIT"
+
+                second_payload = dict(first_payload)
+                second_payload["investigationId"] = "CT-SECOND000"
+                main.store_investigation("second query", second_payload)
+                comparison = await client.post("/api/investigations/compare", json={"firstId": first_payload["investigationId"], "secondId": "CT-SECOND000"})
+                assert comparison.status_code == 200
+                assert "sharedEntities" in comparison.json()
 
                 empty = await client.post("/api/investigate", json={"query": "empty result"})
                 assert empty.status_code == 404

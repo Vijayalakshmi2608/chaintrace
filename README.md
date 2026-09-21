@@ -6,6 +6,8 @@
 
 The application has a premium dark intelligence-console UI, a landing intake flow, staged investigation animation, interactive React Flow dependency graph, exposure detector, trace timeline, source ledger, evidence panel, and concise trace report. The preview path is clearly marked as illustrative; live results only appear after the server successfully retrieves current evidence.
 
+The results experience also supports PDF trace-report export, CSV evidence-ledger export, evidence-type filtering over the already retrieved records, and SQLite-backed short investigation IDs. Users can copy an ID, reopen recent investigations, and compare two stored investigations without repeating SerpApi or OpenRouter calls.
+
 The intended production request path is:
 
 ```text

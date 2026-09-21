@@ -42,6 +42,10 @@ def query_hash(query: str) -> str:
     return hashlib.sha1(query.lower().strip().encode()).hexdigest()
 
 
+def investigation_id(query_hash_value: str) -> str:
+    return f"CT-{query_hash_value[:10].upper()}"
+
+
 def compact(value: Any, limit: int = 240) -> str:
     if isinstance(value, dict):
         value = value.get("name") or value.get("link") or "web source"
@@ -70,33 +74,58 @@ def open_db() -> sqlite3.Connection:
         );
         CREATE TABLE IF NOT EXISTS investigations (
             query_hash TEXT PRIMARY KEY,
+            investigation_id TEXT,
             query TEXT NOT NULL,
             payload TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
         """
     )
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(investigations)").fetchall()}
+    if "investigation_id" not in columns:
+        conn.execute("ALTER TABLE investigations ADD COLUMN investigation_id TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_investigations_id ON investigations(investigation_id)")
     conn.commit()
     return conn
 
 
 def cached_investigation(query: str) -> dict[str, Any] | None:
     with open_db() as conn:
-        row = conn.execute("SELECT payload FROM investigations WHERE query_hash = ?", (query_hash(query),)).fetchone()
-    if not row:
-        return None
+        row = conn.execute("SELECT payload, investigation_id FROM investigations WHERE query_hash = ?", (query_hash(query),)).fetchone()
+        if not row:
+            return None
+        stable_id = row["investigation_id"] or investigation_id(query_hash(query))
+        if not row["investigation_id"]:
+            conn.execute("UPDATE investigations SET investigation_id = ? WHERE query_hash = ?", (stable_id, query_hash(query)))
+            conn.commit()
     logger.info("cache HIT query_hash=%s", query_hash(query))
-    return json.loads(row["payload"])
+    payload = json.loads(row["payload"])
+    payload["investigationId"] = stable_id
+    return payload
 
 
 def store_investigation(query: str, payload: dict[str, Any]) -> None:
+    query_hash_value = query_hash(query)
+    payload["investigationId"] = payload.get("investigationId") or investigation_id(query_hash_value)
     with open_db() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO investigations (query_hash, query, payload, created_at) VALUES (?, ?, ?, ?)",
-            (query_hash(query), query, json.dumps(payload), now_iso()),
+            "INSERT OR REPLACE INTO investigations (query_hash, investigation_id, query, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+            (query_hash_value, payload["investigationId"], query, json.dumps(payload), now_iso()),
         )
         conn.commit()
-    logger.info("cache STORED query_hash=%s", query_hash(query))
+    logger.info("cache STORED query_hash=%s investigation_id=%s", query_hash_value, payload["investigationId"])
+
+
+def recent_investigations(limit: int = 8) -> list[dict[str, Any]]:
+    with open_db() as conn:
+        rows = conn.execute("SELECT investigation_id, query, created_at, payload FROM investigations WHERE investigation_id IS NOT NULL ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [{"investigationId": row["investigation_id"], "query": row["query"], "createdAt": row["created_at"], "metrics": json.loads(row["payload"]).get("metrics", {})} for row in rows]
+
+
+def investigation_by_id(value: str) -> dict[str, Any] | None:
+    with open_db() as conn:
+        row = conn.execute("SELECT payload FROM investigations WHERE investigation_id = ?", (value.upper(),)).fetchone()
+    return json.loads(row["payload"]) if row else None
 
 
 async def serp_search(client: httpx.AsyncClient, query: str, engine: str) -> list[dict[str, Any]]:
@@ -221,6 +250,45 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "chaintrace-api", "model": os.getenv("OPENROUTER_MODEL", "")}
 
 
+@app.get("/api/investigations")
+def list_investigations() -> dict[str, Any]:
+    return {"investigations": recent_investigations()}
+
+
+@app.get("/api/investigations/{value}")
+def get_investigation(value: str) -> dict[str, Any]:
+    payload = investigation_by_id(value)
+    if not payload:
+        raise HTTPException(404, "Investigation not found")
+    payload["cache"] = "HIT"
+    return payload
+
+
+class CompareRequest(BaseModel):
+    firstId: str = Field(min_length=3, max_length=32)
+    secondId: str = Field(min_length=3, max_length=32)
+
+
+@app.post("/api/investigations/compare")
+def compare_investigations(request: CompareRequest) -> dict[str, Any]:
+    first = investigation_by_id(request.firstId)
+    second = investigation_by_id(request.secondId)
+    if not first or not second:
+        raise HTTPException(404, "Both investigations must exist before comparing")
+    first_entities = {node["data"]["label"] for node in first.get("nodes", [])}
+    second_entities = {node["data"]["label"] for node in second.get("nodes", [])}
+    first_relationships = {edge.get("label", "") for edge in first.get("edges", [])}
+    second_relationships = {edge.get("label", "") for edge in second.get("edges", [])}
+    return {
+        "first": {"investigationId": first["investigationId"], "query": first["query"], "metrics": first["metrics"]},
+        "second": {"investigationId": second["investigationId"], "query": second["query"], "metrics": second["metrics"]},
+        "sharedEntities": sorted(first_entities & second_entities),
+        "uniqueFirstEntities": sorted(first_entities - second_entities),
+        "uniqueSecondEntities": sorted(second_entities - first_entities),
+        "sharedRelationships": sorted(first_relationships & second_relationships),
+    }
+
+
 @app.post("/api/investigate")
 async def investigate(request: InvestigationRequest) -> dict[str, Any]:
     query = request.query.strip()
@@ -242,6 +310,7 @@ async def investigate(request: InvestigationRequest) -> dict[str, Any]:
         "query": query,
         "mode": "live",
         "cache": "MISS",
+        "investigationId": investigation_id(query_hash(query)),
         "nodes": nodes,
         "edges": edges,
         "evidence": evidence,

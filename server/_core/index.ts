@@ -35,6 +35,33 @@ async function startServer() {
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  const proxyFastApi = async (path: string, init?: RequestInit) => {
+    const fastApiUrl = process.env.FASTAPI_API_URL?.replace(/\/$/, "");
+    if (!fastApiUrl) return null;
+    const upstream = await fetch(`${fastApiUrl}${path}`, { ...init, signal: AbortSignal.timeout(120000) });
+    return { status: upstream.status, payload: await upstream.json() };
+  };
+  app.get("/api/investigations", async (_req, res) => {
+    try {
+      const result = await proxyFastApi("/api/investigations");
+      if (!result) return res.status(503).json({ message: "Saved investigations require the FastAPI service." });
+      return res.status(result.status).json(result.payload);
+    } catch { return res.status(502).json({ message: "FastAPI service unavailable." }); }
+  });
+  app.get("/api/investigations/:value", async (req, res) => {
+    try {
+      const result = await proxyFastApi(`/api/investigations/${encodeURIComponent(req.params.value)}`);
+      if (!result) return res.status(503).json({ message: "Saved investigations require the FastAPI service." });
+      return res.status(result.status).json(result.payload);
+    } catch { return res.status(502).json({ message: "FastAPI service unavailable." }); }
+  });
+  app.post("/api/investigations/compare", async (req, res) => {
+    try {
+      const result = await proxyFastApi("/api/investigations/compare", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req.body) });
+      if (!result) return res.status(503).json({ message: "Comparison requires the FastAPI service." });
+      return res.status(result.status).json(result.payload);
+    } catch { return res.status(502).json({ message: "FastAPI service unavailable." }); }
+  });
   app.post("/api/investigate", async (req, res) => {
     try {
       const fastApiUrl = process.env.FASTAPI_API_URL?.replace(/\/$/, "");
