@@ -37,8 +37,10 @@ type TraceEdge = {
   type: "smoothstep";
   animated?: boolean;
   label: string;
-  data: { label: string; status: TraceStatus };
+  data: { label: string; status: TraceStatus; evidence_ids?: string[]; confidence?: number };
 };
+
+type RelationshipHint = { subject: string; object: string; relationship_type: string; evidence_ids: string[]; confidence: number; status: TraceStatus };
 
 function hashQuery(query: string) {
   return crypto.createHash("sha1").update(query.toLowerCase().trim()).digest("hex");
@@ -75,8 +77,8 @@ async function searchSerpApi(query: string, engine: "google" | "google_news") {
 
 async function extractRelationshipHints(query: string, evidence: Evidence[]) {
   const key = process.env.OPENROUTER_API_KEY;
-  if (!key || evidence.length === 0) return [] as { subject: string; object: string; relationship_type: string; confidence: number }[];
-  const compactEvidence = evidence.slice(0, 8).map(item => ({ title: item.title, url: item.url, source_type: item.sourceType, date: item.date, snippet: item.snippet }));
+  if (!key || evidence.length === 0) return [] as RelationshipHint[];
+  const compactEvidence = evidence.slice(0, 8).map(item => ({ id: item.id, title: item.title, url: item.url, source_type: item.sourceType, date: item.date, snippet: item.snippet }));
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -86,18 +88,19 @@ async function extractRelationshipHints(query: string, evidence: Evidence[]) {
         model: process.env.OPENROUTER_MODEL || "openrouter/free",
         temperature: 0,
         messages: [
-          { role: "system", content: "Extract only relationships directly supported by the supplied evidence. Return JSON only. Never invent entities or future predictions." },
+          { role: "system", content: "Extract only relationships directly supported by the supplied evidence. Return strict JSON. Every relationship must cite one or more supplied evidence_ids. Use VERIFIED, POSSIBLE, or CONFLICTING based only on the supplied sources. Never invent entities or future predictions." },
           { role: "user", content: JSON.stringify({ query, evidence: compactEvidence }) },
         ],
-        response_format: { type: "json_schema", json_schema: { name: "relationships", strict: true, schema: { type: "object", properties: { relationships: { type: "array", items: { type: "object", properties: { subject: { type: "string" }, object: { type: "string" }, relationship_type: { type: "string" }, confidence: { type: "number" } }, required: ["subject", "object", "relationship_type", "confidence"], additionalProperties: false } } }, required: ["relationships"], additionalProperties: false } } },
+        response_format: { type: "json_schema", json_schema: { name: "relationships", strict: true, schema: { type: "object", properties: { relationships: { type: "array", items: { type: "object", properties: { subject: { type: "string" }, object: { type: "string" }, relationship_type: { type: "string" }, evidence_ids: { type: "array", items: { type: "string" } }, confidence: { type: "number" }, status: { type: "string", enum: ["VERIFIED", "POSSIBLE", "CONFLICTING"] } }, required: ["subject", "object", "relationship_type", "evidence_ids", "confidence", "status"], additionalProperties: false } } }, required: ["relationships"], additionalProperties: false } } },
       }),
     });
     if (!response.ok) return [];
     const payload = await response.json() as { choices?: { message?: { content?: string } }[] };
     const raw = payload.choices?.[0]?.message?.content;
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as { relationships?: { subject: string; object: string; relationship_type: string; confidence: number }[] };
-    return (parsed.relationships ?? []).slice(0, 8).filter(item => item.subject && item.object && item.confidence >= 0.5);
+    const parsed = JSON.parse(raw) as { relationships?: RelationshipHint[] };
+    const validIds = new Set(evidence.map(item => item.id));
+    return (parsed.relationships ?? []).slice(0, 8).map(item => ({ ...item, evidence_ids: item.evidence_ids.filter(id => validIds.has(id)), status: item.status ?? "POSSIBLE" })).filter(item => item.subject && item.object && item.evidence_ids.length > 0 && item.confidence >= 0.5);
   } catch {
     return [];
   }
@@ -124,19 +127,6 @@ function buildEvidence(results: SearchResult[]) {
   return records.slice(0, 10);
 }
 
-function deterministicCandidates(evidence: Evidence[]) {
-  const terms = new Set<string>();
-  for (const item of evidence) {
-    const sourceText = `${item.title} ${item.snippet}`;
-    const candidates = sourceText.match(/\b[A-Z][A-Za-z0-9&.-]{2,}(?:\s+[A-Z][A-Za-z0-9&.-]{2,}){0,2}\b/g) ?? [];
-    candidates.forEach(candidate => {
-      const normalized = candidate.replace(/[.,]$/, "").trim();
-      if (normalized.length > 3 && normalized.length < 42 && !/^The\b/.test(normalized)) terms.add(normalized);
-    });
-  }
-  return Array.from(terms).slice(0, 6);
-}
-
 export async function investigate(query: string) {
   const normalized = query.trim();
   if (!normalized) throw new Error("Enter a company, event, component, or disruption to trace.");
@@ -156,20 +146,21 @@ export async function investigate(query: string) {
   }
   await persistEvidence(normalized, evidence);
   const hints = await extractRelationshipHints(normalized, evidence);
-  const candidates = deterministicCandidates(evidence);
   const rootId = `root-${slugify(normalized)}`;
   const nodes: TraceNode[] = [{ id: rootId, type: "trace", position: { x: 55, y: 215 }, data: { label: normalized.slice(0, 42), kind: "INVESTIGATION", status: "VERIFIED", evidence: evidence.length, exposure: true } }];
   const edges: TraceEdge[] = [];
-  const linked = hints.length > 0 ? hints.flatMap(item => [item.subject, item.object]) : candidates;
+  const linked = hints.flatMap(item => [item.subject, item.object]);
   const uniqueEntities = Array.from(new Set(linked.map(item => item.trim()).filter(Boolean))).slice(0, 7);
   uniqueEntities.forEach((label, index) => {
     const id = `entity-${slugify(label)}-${index}`;
     const isSupplier = /supplier|supply|memory|chip|component|manufacturer|foundry/i.test(label);
     const isDownstream = /cloud|automotive|retail|bank|platform|customer/i.test(label);
-    nodes.push({ id, type: "trace", position: { x: 335 + (index % 2) * 300, y: 80 + Math.floor(index / 2) * 150 }, data: { label: label.slice(0, 42), kind: isSupplier ? "SUPPLIER" : isDownstream ? "DOWNSTREAM" : "ENTITY", status: hints.length > 0 ? "VERIFIED" : "POSSIBLE", evidence: Math.max(1, Math.min(6, evidence.length - (index % 3))), exposure: isSupplier } });
-    const relationship = hints.find(item => item.subject.toLowerCase() === normalized.toLowerCase() || item.subject.toLowerCase().includes(label.toLowerCase()) || item.object.toLowerCase().includes(label.toLowerCase()));
-    const edgeLabel = relationship?.relationship_type || (isSupplier ? "supplied by" : isDownstream ? "connected to" : "mentioned with");
-    edges.push({ id: `edge-${rootId}-${id}`, source: rootId, target: id, type: "smoothstep", label: edgeLabel, data: { label: edgeLabel, status: relationship ? "VERIFIED" : "POSSIBLE" }, animated: index === 0 });
+    const relationship = hints.find(item => item.subject === label || item.object === label);
+    nodes.push({ id, type: "trace", position: { x: 335 + (index % 2) * 300, y: 80 + Math.floor(index / 2) * 150 }, data: { label: label.slice(0, 42), kind: isSupplier ? "SUPPLIER" : isDownstream ? "DOWNSTREAM" : "ENTITY", status: relationship?.status ?? "POSSIBLE", evidence: relationship?.evidence_ids.length ?? 0, exposure: relationship?.status === "VERIFIED" && isSupplier } });
+    if (relationship) {
+      const edgeLabel = relationship.relationship_type;
+      edges.push({ id: `edge-${rootId}-${id}`, source: rootId, target: id, type: "smoothstep", label: edgeLabel, data: { label: edgeLabel, status: relationship.status, evidence_ids: relationship.evidence_ids, confidence: relationship.confidence }, animated: index === 0 });
+    }
   });
   return {
     query: normalized,

@@ -1,11 +1,12 @@
-"""CHAINTRACE FastAPI reference backend.
+"""CHAINTRACE production investigation API.
 
-The WebDev host runs the production request adapter in server/investigation.ts so the
-managed runtime stays single-process. This file exposes the same contract for local
-Python development and deployment into a Python-capable environment.
+This service is the source of truth for live investigations. It retrieves compact
+search/news evidence from SerpApi, makes one small OpenRouter/free extraction call,
+persists the complete result in SQLite, and returns only source-linked graph data.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,91 +17,231 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "chaintrace.sqlite"
-app = FastAPI(title="CHAINTRACE API", version="0.9.4")
+DB_PATH = Path(os.getenv("SQLITE_PATH", ROOT / "chaintrace.sqlite"))
+app = FastAPI(title="CHAINTRACE API", version="1.0.0")
+cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["*"])
 
 
 class InvestigationRequest(BaseModel):
     query: str = Field(min_length=3, max_length=240)
 
 
-def connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS evidence (
-            id TEXT PRIMARY KEY, query_hash TEXT NOT NULL, title TEXT NOT NULL,
-            source TEXT NOT NULL, source_type TEXT NOT NULL, date TEXT NOT NULL,
-            snippet TEXT NOT NULL, url TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )"""
-    )
-    conn.commit()
-    return conn
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def query_hash(query: str) -> str:
     return hashlib.sha1(query.lower().strip().encode()).hexdigest()
 
 
-def compact(value: str, limit: int = 240) -> str:
-    value = " ".join(value.split())
+def compact(value: Any, limit: int = 240) -> str:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("link") or "web source"
+    value = " ".join(str(value or "").split())
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
-async def serp_search(query: str, engine: str) -> list[dict[str, Any]]:
+def open_db() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS evidence (
+            id TEXT PRIMARY KEY,
+            query_hash TEXT NOT NULL,
+            title TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            date TEXT NOT NULL,
+            snippet TEXT NOT NULL,
+            url TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS investigations (
+            query_hash TEXT PRIMARY KEY,
+            query TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def cached_investigation(query: str) -> dict[str, Any] | None:
+    with open_db() as conn:
+        row = conn.execute("SELECT payload FROM investigations WHERE query_hash = ?", (query_hash(query),)).fetchone()
+    return json.loads(row["payload"]) if row else None
+
+
+def store_investigation(query: str, payload: dict[str, Any]) -> None:
+    with open_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO investigations (query_hash, query, payload, created_at) VALUES (?, ?, ?, ?)",
+            (query_hash(query), query, json.dumps(payload), now_iso()),
+        )
+        conn.commit()
+
+
+async def serp_search(client: httpx.AsyncClient, query: str, engine: str) -> list[dict[str, Any]]:
     key = os.getenv("SERPAPI_API_KEY")
     if not key:
         raise HTTPException(503, "SERPAPI_API_KEY is not configured")
     params = {"engine": engine, "q": query, "api_key": key, "num": 6, "hl": "en"}
-    async with httpx.AsyncClient(timeout=20) as client:
+    try:
         response = await client.get("https://serpapi.com/search.json", params=params)
         response.raise_for_status()
         payload = response.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"SerpApi request failed: {exc.__class__.__name__}") from exc
     return payload.get("news_results" if engine == "google_news" else "organic_results", [])
+
+
+def normalize_evidence(query: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for result in results:
+        url = compact(result.get("link"), 200).strip()
+        if not url or not url.startswith(("http://", "https://")) or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        record = {
+            "id": "ev-" + hashlib.md5(url.encode()).hexdigest()[:10],
+            "title": compact(result.get("title") or "Untitled source", 110),
+            "source": compact(result.get("source") or "web source", 100),
+            "sourceType": compact(result.get("source_type") or ("NEWS" if result.get("date") else "SEARCH"), 30),
+            "date": compact(result.get("date") or datetime.now(timezone.utc).date().isoformat(), 40),
+            "snippet": compact(result.get("snippet") or "No snippet returned by source."),
+            "status": "VERIFIED",
+            "url": url,
+        }
+        records.append(record)
+    return records[:10]
+
+
+async def extract_relationships(query: str, evidence: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
+    key = os.getenv("OPENROUTER_API_KEY")
+    model = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+    if not key:
+        return [], "OpenRouter extraction is not configured; evidence was collected but no relationships were asserted."
+    compact_evidence = [
+        {"id": item["id"], "title": item["title"], "url": item["url"], "source_type": item["sourceType"], "date": item["date"], "snippet": item["snippet"]}
+        for item in evidence[:8]
+    ]
+    schema = {
+        "type": "object",
+        "properties": {
+            "relationships": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "object": {"type": "string"},
+                        "relationship_type": {"type": "string"},
+                        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                        "confidence": {"type": "number"},
+                        "status": {"type": "string", "enum": ["VERIFIED", "POSSIBLE", "CONFLICTING"]},
+                    },
+                    "required": ["subject", "object", "relationship_type", "evidence_ids", "confidence", "status"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["relationships"],
+        "additionalProperties": False,
+    }
+    body = {
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": "Use only the supplied evidence. Return strict JSON. Every relationship must cite one or more supplied evidence_ids. Use VERIFIED only for direct support, POSSIBLE for weaker but relevant support, and CONFLICTING only when supplied sources directly disagree. Never infer future impact."},
+            {"role": "user", "content": json.dumps({"query": query, "evidence": compact_evidence})},
+        ],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "chaintrace_relationships", "strict": True, "schema": schema}},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "HTTP-Referer": "https://chaintrace.app", "X-Title": "CHAINTRACE"}, json=body)
+        response.raise_for_status()
+        raw = response.json().get("choices", [{}])[0].get("message", {}).get("content")
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        candidates = parsed.get("relationships", []) if isinstance(parsed, dict) else []
+    except (httpx.HTTPError, json.JSONDecodeError, TypeError, AttributeError, IndexError, KeyError):
+        return [], "OpenRouter returned an unavailable or malformed relationship response; no unsupported relationships were asserted."
+
+    valid_ids = {item["id"] for item in evidence}
+    clean: list[dict[str, Any]] = []
+    for item in candidates if isinstance(candidates, list) else []:
+        evidence_ids = [value for value in item.get("evidence_ids", []) if value in valid_ids]
+        subject, obj = compact(item.get("subject"), 80), compact(item.get("object"), 80)
+        if not subject or not obj or not evidence_ids:
+            continue
+        confidence = float(item.get("confidence", 0))
+        status = item.get("status") if item.get("status") in {"VERIFIED", "POSSIBLE", "CONFLICTING"} else "POSSIBLE"
+        if status == "VERIFIED" and confidence < 0.75:
+            status = "POSSIBLE"
+        clean.append({"subject": subject, "object": obj, "relationship_type": compact(item.get("relationship_type") or "connected to", 60), "evidence_ids": evidence_ids, "confidence": max(0, min(confidence, 1)), "status": status})
+    return clean[:12], None
+
+
+def build_graph(query: str, evidence: list[dict[str, Any]], relationships: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    root_id = "root-" + hashlib.md5(query.lower().encode()).hexdigest()[:10]
+    nodes: dict[str, dict[str, Any]] = {root_id: {"id": root_id, "type": "trace", "position": {"x": 55, "y": 215}, "data": {"label": query[:42], "kind": "INVESTIGATION", "status": "VERIFIED", "evidence": len(evidence), "exposure": True}}}
+    edges: list[dict[str, Any]] = []
+    for index, relationship in enumerate(relationships):
+        subject_id = root_id if relationship["subject"].lower() in query.lower() else "entity-" + hashlib.md5(relationship["subject"].lower().encode()).hexdigest()[:8]
+        object_id = "entity-" + hashlib.md5(relationship["object"].lower().encode()).hexdigest()[:8]
+        for entity_id, label in ((subject_id, relationship["subject"]), (object_id, relationship["object"])):
+            if entity_id not in nodes:
+                nodes[entity_id] = {"id": entity_id, "type": "trace", "position": {"x": 335 + (index % 2) * 300, "y": 90 + (index // 2) * 150}, "data": {"label": label, "kind": "ENTITY", "status": relationship["status"], "evidence": len(relationship["evidence_ids"]), "exposure": relationship["status"] == "VERIFIED"}}
+        edges.append({"id": f"edge-{index}-{subject_id}-{object_id}", "source": subject_id, "target": object_id, "type": "smoothstep", "label": relationship["relationship_type"], "data": {"label": relationship["relationship_type"], "status": relationship["status"], "evidence_ids": relationship["evidence_ids"], "confidence": relationship["confidence"]}, "animated": index == 0})
+    return list(nodes.values()), edges
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "chaintrace-api"}
+    return {"status": "ok", "service": "chaintrace-api", "model": os.getenv("OPENROUTER_MODEL", "")}
 
 
 @app.post("/api/investigate")
 async def investigate(request: InvestigationRequest) -> dict[str, Any]:
     query = request.query.strip()
-    search_results, news_results = await serp_search(query, "google"), await serp_search(query, "google_news")
-    seen: set[str] = set()
-    records: list[dict[str, Any]] = []
-    with connection() as conn:
-        for result in [*search_results, *news_results]:
-            url = (result.get("link") or "").strip()
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            record = {
-                "id": "ev-" + hashlib.md5(url.encode()).hexdigest()[:10],
-                "title": compact(result.get("title", "Untitled source"), 110),
-                "source": result.get("source", "web source"),
-                "sourceType": result.get("source_type", "NEWS" if result.get("date") else "SEARCH"),
-                "date": result.get("date") or datetime.now(timezone.utc).date().isoformat(),
-                "snippet": compact(result.get("snippet", "No snippet returned by source.")),
-                "status": "VERIFIED",
-                "url": url,
-            }
-            conn.execute(
-                "INSERT OR IGNORE INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record["id"], query_hash(query), record["title"], record["source"], record["sourceType"], record["date"], record["snippet"], record["url"], record["status"], datetime.now(timezone.utc).isoformat()),
-            )
-            records.append(record)
-    if not records:
-        raise HTTPException(404, "No relevant sources were returned for this trace.")
-    return {
+    cached = cached_investigation(query)
+    if cached:
+        cached["cache"] = "HIT"
+        return cached
+
+    async with httpx.AsyncClient(timeout=12) as client:
+        search_results, news_results = await asyncio.gather(serp_search(client, query, "google"), serp_search(client, query, "google_news"))
+    evidence = normalize_evidence(query, [*search_results, *news_results])
+    if not evidence:
+        raise HTTPException(404, "No relevant sources with valid URLs were returned for this trace.")
+
+    relationships, notice = await extract_relationships(query, evidence)
+    nodes, edges = build_graph(query, evidence, relationships)
+    payload: dict[str, Any] = {
         "query": query,
         "mode": "live",
-        "evidence": records[:10],
-        "metrics": {"entities": 1, "relationships": 0, "sources": len(records[:10]), "conflicts": 0},
-        "notice": "Relationship extraction is intentionally kept compact; add OpenRouter extraction to enrich graph links.",
+        "cache": "MISS",
+        "nodes": nodes,
+        "edges": edges,
+        "evidence": evidence,
+        "relationships": relationships,
+        "metrics": {"entities": len(nodes), "relationships": len(edges), "sources": len(evidence), "conflicts": sum(1 for item in relationships if item["status"] == "CONFLICTING")},
+        "report": (f"The trace found {len(evidence)} deduplicated source records and {len(edges)} source-linked relationships. Review the cited evidence before treating a possible link as operationally verified." if edges else f"The trace found {len(evidence)} deduplicated source records, but no source-linked relationships passed validation. No unsupported links were added."),
+        "timeline": [{"date": "01 / ANCHOR", "label": "Investigation anchor", "detail": f"The trace began with “{query}”."}, {"date": "02 / EVIDENCE", "label": "Cross-domain retrieval", "detail": f"{len(evidence)} relevant records were deduplicated from search and news surfaces."}, {"date": "03 / LINKING", "label": "Relationship reconstruction", "detail": f"{len(edges)} relationships passed evidence-ID validation."}],
+        "exposure": [{"label": node["data"]["label"], "detail": "Directly supported by cited evidence.", "level": "HIGH" if node["data"]["status"] == "VERIFIED" else "MEDIUM"} for node in nodes if node["data"].get("exposure")],
+        "notice": notice,
     }
+    store_investigation(query, payload)
+    return payload

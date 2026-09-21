@@ -37,6 +37,18 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   app.post("/api/investigate", async (req, res) => {
     try {
+      const fastApiUrl = process.env.FASTAPI_API_URL?.replace(/\/$/, "");
+      if (fastApiUrl) {
+        const upstream = await fetch(`${fastApiUrl}/api/investigate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: String(req.body?.query || "") }),
+          signal: AbortSignal.timeout(120000),
+        });
+        const payload = await upstream.json();
+        res.status(upstream.status).json(payload);
+        return;
+      }
       const payload = await investigate(String(req.body?.query || ""));
       res.json(payload);
     } catch (error) {
