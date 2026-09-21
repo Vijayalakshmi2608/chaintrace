@@ -95,10 +95,14 @@ async function extractRelationshipHints(query: string, evidence: Evidence[]) {
       }),
     });
     if (!response.ok) return [];
-    const payload = await response.json() as { choices?: { message?: { content?: string } }[] };
+    const payload = await response.json() as { choices?: { message?: { content?: string | { text?: string }[] } }[] };
     const raw = payload.choices?.[0]?.message?.content;
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as { relationships?: RelationshipHint[] };
+    const text = typeof raw === "string" ? raw : Array.isArray(raw) ? raw.map(part => part.text || "").join(" ") : "";
+    if (!text) return [];
+    const normalized = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+    const start = normalized.indexOf("{");
+    const end = normalized.lastIndexOf("}");
+    const parsed = JSON.parse(start >= 0 && end > start ? normalized.slice(start, end + 1) : normalized) as { relationships?: RelationshipHint[] };
     const validIds = new Set(evidence.map(item => item.id));
     return (parsed.relationships ?? []).slice(0, 8).map(item => ({ ...item, evidence_ids: item.evidence_ids.filter(id => validIds.has(id)), status: item.status ?? "POSSIBLE" })).filter(item => item.subject && item.object && item.evidence_ids.length > 0 && item.confidence >= 0.5);
   } catch {
@@ -169,7 +173,7 @@ export async function investigate(query: string) {
     edges,
     evidence,
     metrics: { entities: nodes.length, relationships: edges.length, sources: evidence.length, conflicts: 0 },
-    report: hints.length > 0 ? `The current evidence set supports ${hints.length} extracted relationship${hints.length === 1 ? "" : "s"}. Review each source before treating a possible link as operationally verified.` : `The trace found ${evidence.length} deduplicated source${evidence.length === 1 ? "" : "s"}. No strict-JSON relationships were returned, so the graph uses deterministic, possible links rather than inventing certainty.`,
+    report: hints.length > 0 ? `The current evidence set supports ${hints.length} extracted relationship${hints.length === 1 ? "" : "s"}. Review each source before treating a possible link as operationally verified.` : `The trace found ${evidence.length} deduplicated source${evidence.length === 1 ? "" : "s"}, but no source-linked relationships passed validation. No unsupported links were added.`,
     timeline: [
       { date: "01 / ANCHOR", label: "Investigation anchor", detail: `The trace began with “${normalized}”.` },
       { date: "02 / EVIDENCE", label: "Cross-domain retrieval", detail: `${evidence.length} relevant records were deduplicated from search and news surfaces.` },
