@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: chaintrace-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    disk:
+      name: chaintrace-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: SERPAPI_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: openrouter/free
+      - key: SQLITE_PATH
+        value: /var/data/chaintrace.sqlite
+      - key: CORS_ORIGINS
+        fromService:
+          type: web
+          name: chaintrace-frontend
+          envVarKey: RENDER_EXTERNAL_URL
+
+  - type: web
+    name: chaintrace-frontend
+    runtime: static
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    staticPublishPath: ./dist/public
+    envVars:
+      - key: VITE_API_BASE_URL
+        fromService:
+          type: web
+          name: chaintrace-api
+          envVarKey: RENDER_EXTERNAL_URL

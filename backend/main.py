@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -19,6 +20,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("chaintrace")
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("SQLITE_PATH", ROOT / "chaintrace.sqlite"))
@@ -80,7 +83,10 @@ def open_db() -> sqlite3.Connection:
 def cached_investigation(query: str) -> dict[str, Any] | None:
     with open_db() as conn:
         row = conn.execute("SELECT payload FROM investigations WHERE query_hash = ?", (query_hash(query),)).fetchone()
-    return json.loads(row["payload"]) if row else None
+    if not row:
+        return None
+    logger.info("cache HIT query_hash=%s", query_hash(query))
+    return json.loads(row["payload"])
 
 
 def store_investigation(query: str, payload: dict[str, Any]) -> None:
@@ -90,6 +96,7 @@ def store_investigation(query: str, payload: dict[str, Any]) -> None:
             (query_hash(query), query, json.dumps(payload), now_iso()),
         )
         conn.commit()
+    logger.info("cache STORED query_hash=%s", query_hash(query))
 
 
 async def serp_search(client: httpx.AsyncClient, query: str, engine: str) -> list[dict[str, Any]]:
@@ -170,6 +177,7 @@ async def extract_relationships(query: str, evidence: list[dict[str, Any]]) -> t
         "response_format": {"type": "json_schema", "json_schema": {"name": "chaintrace_relationships", "strict": True, "schema": schema}},
     }
     try:
+        logger.info("openrouter extraction model=%s evidence_count=%s", model, len(compact_evidence))
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "HTTP-Referer": "https://chaintrace.app", "X-Title": "CHAINTRACE"}, json=body)
         response.raise_for_status()
@@ -221,6 +229,7 @@ async def investigate(request: InvestigationRequest) -> dict[str, Any]:
         cached["cache"] = "HIT"
         return cached
 
+    logger.info("cache MISS query_hash=%s; requesting SerpApi evidence", query_hash(query))
     async with httpx.AsyncClient(timeout=12) as client:
         search_results, news_results = await asyncio.gather(serp_search(client, query, "google"), serp_search(client, query, "google_news"))
     evidence = normalize_evidence(query, [*search_results, *news_results])

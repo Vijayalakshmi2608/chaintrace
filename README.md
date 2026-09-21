@@ -52,6 +52,8 @@ uvicorn backend.main:app --reload --port 8000
 
 On Render, attach a Persistent Disk to the FastAPI service and set `SQLITE_PATH` to a file on that disk. Set `CORS_ORIGINS` to the exact frontend origin and keep `SERPAPI_API_KEY`, `OPENROUTER_API_KEY`, and `OPENROUTER_MODEL=openrouter/free` as server environment variables only.
 
+The repository includes [`render.yaml`](render.yaml) for the two existing app components and [`RENDER_SMOKE_TEST.md`](RENDER_SMOKE_TEST.md) for the post-deployment miss/hit, response-parity, disk, and CORS checks.
+
 ## Validation
 
 ```bash
