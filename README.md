@@ -12,6 +12,8 @@
 
 The GIF shows the verified interface flow from query intake through live trace progress to the evidence-backed result dashboard. The live screenshot includes the graph, source ledger, trace report, and evidence-linked result state.
 
+**Dashboard screenshot caption.** The live dashboard shows the investigation query **“Apple TSMC chip supplier relationship.”** SerpApi returned 10 indexed source records, visible in the evidence ledger, while the resulting React Flow canvas contains the investigation anchor and no relationship edges because no source-linked relationship passed validation for that run. The trace report explicitly preserves this zero-edge result rather than presenting an unsupported Apple–TSMC connection as fact.
+
 ## Overview
 
 A real-world event rarely stays inside one category. A chip shortage can affect a supplier, a component, a manufacturer, and a downstream product at the same time. The difficult part is not finding isolated facts; it is connecting them while preserving the evidence trail.
