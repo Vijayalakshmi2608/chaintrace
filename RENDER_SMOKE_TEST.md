@@ -6,7 +6,7 @@ Use the repository `render.yaml` Blueprint. It defines the existing Vite/React s
 
 ```text
 SQLITE_PATH=/var/data/chaintrace.sqlite
-OPENROUTER_MODEL=google/gemini-3.8-flash
+OPENROUTER_MODEL=openrouter/free
 ```
 
 Set these values in Render environment variables or through the Blueprint:
@@ -15,7 +15,7 @@ Set these values in Render environment variables or through the Blueprint:
 SERPAPI_API_KEY=<server-only secret>
 OPENROUTER_API_KEY=<server-only secret>
 SQLITE_PATH=/var/data/chaintrace.sqlite
-OPENROUTER_MODEL=google/gemini-3.8-flash
+OPENROUTER_MODEL=openrouter/free
 CORS_ORIGINS=https://<deployed-frontend-origin>
 ```
 
@@ -65,7 +65,7 @@ export QUERY="Nvidia Blackwell HBM supplier dependencies"
    PY
    ```
 
-5. In the FastAPI Render logs, confirm the first request contains `cache MISS`, `requesting SerpApi evidence`, `openrouter extraction model=google/gemini-3.8-flash`, and `cache STORED`. Confirm the repeated request contains only `cache HIT` for the same `query_hash`; it must not log another SerpApi or OpenRouter stage.
+5. In the FastAPI Render logs, confirm the first request contains `cache MISS`, `requesting SerpApi evidence`, `openrouter extraction model=openrouter/free`, and `cache STORED`. Confirm the repeated request contains only `cache HIT` for the same `query_hash`; it must not log another SerpApi or OpenRouter stage.
 6. Confirm the Render Persistent Disk contains `/var/data/chaintrace.sqlite` after the first request and that a service restart still returns `cache HIT` for the identical query.
 
 ## Expected failure behavior

@@ -15,7 +15,7 @@ async def run() -> None:
         main.DB_PATH = Path(temp_dir) / "chaintrace.sqlite"
         main.os.environ["SERPAPI_API_KEY"] = "test-serp"
         main.os.environ["OPENROUTER_API_KEY"] = "test-router"
-        main.os.environ["OPENROUTER_MODEL"] = "google/gemini-3.8-flash"
+        main.os.environ["OPENROUTER_MODEL"] = "openrouter/free"
         serp_calls = 0
         extraction_calls = 0
 
@@ -84,7 +84,7 @@ async def run() -> None:
                 assert router_failure.json()["metrics"]["relationships"] == 0
                 assert "malformed relationship response" in router_failure.json()["notice"]
 
-            assert main.os.environ["OPENROUTER_MODEL"] == "google/gemini-3.8-flash"
+            assert main.os.environ["OPENROUTER_MODEL"] == "openrouter/free"
             valid = main.normalize_evidence("dedupe", [{"link": "https://example.com/a"}, {"link": "https://example.com/a"}, {"title": "no url"}])
             assert len(valid) == 1
 

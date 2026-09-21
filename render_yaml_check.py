@@ -13,7 +13,7 @@ assert api["runtime"] == "python"
 assert api["disk"]["mountPath"] == "/var/data"
 api_env = {item["key"]: item for item in api["envVars"]}
 assert api_env["SQLITE_PATH"]["value"] == "/var/data/chaintrace.sqlite"
-assert api_env["OPENROUTER_MODEL"]["value"] == "google/gemini-3.8-flash"
+assert api_env["OPENROUTER_MODEL"]["value"] == "openrouter/free"
 assert api_env["CORS_ORIGINS"]["fromService"]["name"] == "chaintrace-frontend"
 assert frontend["runtime"] == "static"
 assert frontend["envVars"][0]["key"] == "VITE_API_BASE_URL"

@@ -166,7 +166,7 @@ def normalize_evidence(query: str, results: list[dict[str, Any]]) -> list[dict[s
 
 async def extract_relationships(query: str, evidence: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
     key = os.getenv("OPENROUTER_API_KEY")
-    model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.8-flash")
+    model = os.getenv("OPENROUTER_MODEL", "openrouter/free")
     if not key:
         return [], "OpenRouter extraction is not configured; evidence was collected but no relationships were asserted."
     compact_evidence = [

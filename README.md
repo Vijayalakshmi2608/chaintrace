@@ -25,7 +25,7 @@ Server-only secrets are configured through the WebDev project secret manager. Th
 ```text
 SERPAPI_API_KEY=...
 OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=google/gemini-3.8-flash
+OPENROUTER_MODEL=openrouter/free
 VITE_API_BASE_URL=https://your-fastapi-service.onrender.com
 FASTAPI_API_URL=https://your-fastapi-service.onrender.com
 CORS_ORIGINS=https://your-frontend-service.onrender.com
@@ -52,7 +52,7 @@ pip install -r backend/requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
 
-On Render, attach a Persistent Disk to the FastAPI service and set `SQLITE_PATH` to a file on that disk. Set `CORS_ORIGINS` to the exact frontend origin and keep `SERPAPI_API_KEY`, `OPENROUTER_API_KEY`, and `OPENROUTER_MODEL=google/gemini-3.8-flash` as server environment variables only. Relationship extraction caps output at 1,200 tokens to prevent an oversized default request from exhausting the available OpenRouter credit balance.
+On Render, attach a Persistent Disk to the FastAPI service and set `SQLITE_PATH` to a file on that disk. Set `CORS_ORIGINS` to the exact frontend origin and keep `SERPAPI_API_KEY`, `OPENROUTER_API_KEY`, and `OPENROUTER_MODEL=openrouter/free` as server environment variables only. Relationship extraction caps output at 1,200 tokens.
 
 The repository includes [`render.yaml`](render.yaml) for the two existing app components and [`RENDER_SMOKE_TEST.md`](RENDER_SMOKE_TEST.md) for the post-deployment miss/hit, response-parity, disk, and CORS checks.
 
