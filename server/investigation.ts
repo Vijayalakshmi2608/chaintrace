@@ -85,7 +85,8 @@ async function extractRelationshipHints(query: string, evidence: Evidence[]) {
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://chaintrace.app", "X-Title": "CHAINTRACE" },
       signal: AbortSignal.timeout(15000),
       body: JSON.stringify({
-        model: process.env.OPENROUTER_MODEL || "openrouter/free",
+        model: process.env.OPENROUTER_MODEL || "google/gemini-3.8-flash",
+        max_tokens: 1200,
         temperature: 0,
         messages: [
           { role: "system", content: "Extract only relationships directly supported by the supplied evidence. Return strict JSON. Every relationship must cite one or more supplied evidence_ids. Use VERIFIED, POSSIBLE, or CONFLICTING based only on the supplied sources. Never invent entities or future predictions." },
