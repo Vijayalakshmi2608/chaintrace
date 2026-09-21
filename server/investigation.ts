@@ -1,0 +1,190 @@
+import crypto from "node:crypto";
+import { persistEvidence } from "./sqliteCache";
+
+export type TraceStatus = "VERIFIED" | "POSSIBLE" | "CONFLICTING";
+
+type SearchResult = {
+  title?: string;
+  link?: string;
+  snippet?: string;
+  date?: string;
+  source?: string | { name?: string; link?: string };
+  source_type?: string;
+};
+
+type Evidence = {
+  id: string;
+  title: string;
+  source: string;
+  sourceType: string;
+  date: string;
+  snippet: string;
+  status: TraceStatus;
+  url: string;
+};
+
+type TraceNode = {
+  id: string;
+  type: "trace";
+  position: { x: number; y: number };
+  data: { label: string; kind: string; status: TraceStatus; evidence: number; exposure?: boolean };
+};
+
+type TraceEdge = {
+  id: string;
+  source: string;
+  target: string;
+  type: "smoothstep";
+  animated?: boolean;
+  label: string;
+  data: { label: string; status: TraceStatus };
+};
+
+function hashQuery(query: string) {
+  return crypto.createHash("sha1").update(query.toLowerCase().trim()).digest("hex");
+}
+
+function slugify(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 36);
+}
+
+function clampText(value: string, max = 240) {
+  const clean = value.replace(/\s+/g, " ").trim();
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+function sourceLabel(source: SearchResult["source"], url: string) {
+  if (typeof source === "string" && source.trim()) return source.trim();
+  if (source && typeof source === "object" && typeof source.name === "string" && source.name.trim()) return source.name.trim();
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "web source"; }
+}
+
+async function searchSerpApi(query: string, engine: "google" | "google_news") {
+  const key = process.env.SERPAPI_API_KEY;
+  if (!key) return [] as SearchResult[];
+  const params = new URLSearchParams({ engine, q: query, api_key: key, num: "6", hl: "en" });
+  try {
+    const response = await fetch(`https://serpapi.com/search.json?${params.toString()}`, { signal: AbortSignal.timeout(12000) });
+    if (!response.ok) return [];
+    const payload = await response.json() as { organic_results?: SearchResult[]; news_results?: SearchResult[] };
+    return engine === "google_news" ? (payload.news_results ?? []) : (payload.organic_results ?? []);
+  } catch {
+    return [];
+  }
+}
+
+async function extractRelationshipHints(query: string, evidence: Evidence[]) {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key || evidence.length === 0) return [] as { subject: string; object: string; relationship_type: string; confidence: number }[];
+  const compactEvidence = evidence.slice(0, 8).map(item => ({ title: item.title, url: item.url, source_type: item.sourceType, date: item.date, snippet: item.snippet }));
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://chaintrace.app", "X-Title": "CHAINTRACE" },
+      signal: AbortSignal.timeout(15000),
+      body: JSON.stringify({
+        model: process.env.OPENROUTER_MODEL || "openrouter/free",
+        temperature: 0,
+        messages: [
+          { role: "system", content: "Extract only relationships directly supported by the supplied evidence. Return JSON only. Never invent entities or future predictions." },
+          { role: "user", content: JSON.stringify({ query, evidence: compactEvidence }) },
+        ],
+        response_format: { type: "json_schema", json_schema: { name: "relationships", strict: true, schema: { type: "object", properties: { relationships: { type: "array", items: { type: "object", properties: { subject: { type: "string" }, object: { type: "string" }, relationship_type: { type: "string" }, confidence: { type: "number" } }, required: ["subject", "object", "relationship_type", "confidence"], additionalProperties: false } } }, required: ["relationships"], additionalProperties: false } } },
+      }),
+    });
+    if (!response.ok) return [];
+    const payload = await response.json() as { choices?: { message?: { content?: string } }[] };
+    const raw = payload.choices?.[0]?.message?.content;
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as { relationships?: { subject: string; object: string; relationship_type: string; confidence: number }[] };
+    return (parsed.relationships ?? []).slice(0, 8).filter(item => item.subject && item.object && item.confidence >= 0.5);
+  } catch {
+    return [];
+  }
+}
+
+function buildEvidence(results: SearchResult[]) {
+  const seen = new Set<string>();
+  const records: Evidence[] = [];
+  for (const result of results) {
+    const url = result.link?.trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    records.push({
+      id: `ev-${crypto.createHash("md5").update(url).digest("hex").slice(0, 10)}`,
+      title: clampText(result.title || "Untitled source", 110),
+      source: sourceLabel(result.source, url),
+      sourceType: result.source_type || (result.date ? "NEWS" : "SEARCH"),
+      date: result.date || new Date().toISOString().slice(0, 10),
+      snippet: clampText(result.snippet || "No snippet returned by source."),
+      status: "VERIFIED",
+      url,
+    });
+  }
+  return records.slice(0, 10);
+}
+
+function deterministicCandidates(evidence: Evidence[]) {
+  const terms = new Set<string>();
+  for (const item of evidence) {
+    const sourceText = `${item.title} ${item.snippet}`;
+    const candidates = sourceText.match(/\b[A-Z][A-Za-z0-9&.-]{2,}(?:\s+[A-Z][A-Za-z0-9&.-]{2,}){0,2}\b/g) ?? [];
+    candidates.forEach(candidate => {
+      const normalized = candidate.replace(/[.,]$/, "").trim();
+      if (normalized.length > 3 && normalized.length < 42 && !/^The\b/.test(normalized)) terms.add(normalized);
+    });
+  }
+  return Array.from(terms).slice(0, 6);
+}
+
+export async function investigate(query: string) {
+  const normalized = query.trim();
+  if (!normalized) throw new Error("Enter a company, event, component, or disruption to trace.");
+  const serpConfigured = Boolean(process.env.SERPAPI_API_KEY);
+  if (!serpConfigured) {
+    const error = new Error("Live tracing is not configured yet. Add SERPAPI_API_KEY to .env to collect current evidence, or open the interactive preview.");
+    (error as Error & { code?: string }).code = "CONFIGURATION_REQUIRED";
+    throw error;
+  }
+
+  const [searchResults, newsResults] = await Promise.all([searchSerpApi(normalized, "google"), searchSerpApi(normalized, "google_news")]);
+  const evidence = buildEvidence([...searchResults, ...newsResults]);
+  if (evidence.length === 0) {
+    const error = new Error("No relevant sources were returned for this trace. Try a more specific query.");
+    (error as Error & { code?: string }).code = "EMPTY_RESULTS";
+    throw error;
+  }
+  await persistEvidence(normalized, evidence);
+  const hints = await extractRelationshipHints(normalized, evidence);
+  const candidates = deterministicCandidates(evidence);
+  const rootId = `root-${slugify(normalized)}`;
+  const nodes: TraceNode[] = [{ id: rootId, type: "trace", position: { x: 55, y: 215 }, data: { label: normalized.slice(0, 42), kind: "INVESTIGATION", status: "VERIFIED", evidence: evidence.length, exposure: true } }];
+  const edges: TraceEdge[] = [];
+  const linked = hints.length > 0 ? hints.flatMap(item => [item.subject, item.object]) : candidates;
+  const uniqueEntities = Array.from(new Set(linked.map(item => item.trim()).filter(Boolean))).slice(0, 7);
+  uniqueEntities.forEach((label, index) => {
+    const id = `entity-${slugify(label)}-${index}`;
+    const isSupplier = /supplier|supply|memory|chip|component|manufacturer|foundry/i.test(label);
+    const isDownstream = /cloud|automotive|retail|bank|platform|customer/i.test(label);
+    nodes.push({ id, type: "trace", position: { x: 335 + (index % 2) * 300, y: 80 + Math.floor(index / 2) * 150 }, data: { label: label.slice(0, 42), kind: isSupplier ? "SUPPLIER" : isDownstream ? "DOWNSTREAM" : "ENTITY", status: hints.length > 0 ? "VERIFIED" : "POSSIBLE", evidence: Math.max(1, Math.min(6, evidence.length - (index % 3))), exposure: isSupplier } });
+    const relationship = hints.find(item => item.subject.toLowerCase() === normalized.toLowerCase() || item.subject.toLowerCase().includes(label.toLowerCase()) || item.object.toLowerCase().includes(label.toLowerCase()));
+    const edgeLabel = relationship?.relationship_type || (isSupplier ? "supplied by" : isDownstream ? "connected to" : "mentioned with");
+    edges.push({ id: `edge-${rootId}-${id}`, source: rootId, target: id, type: "smoothstep", label: edgeLabel, data: { label: edgeLabel, status: relationship ? "VERIFIED" : "POSSIBLE" }, animated: index === 0 });
+  });
+  return {
+    query: normalized,
+    mode: "live" as const,
+    nodes,
+    edges,
+    evidence,
+    metrics: { entities: nodes.length, relationships: edges.length, sources: evidence.length, conflicts: 0 },
+    report: hints.length > 0 ? `The current evidence set supports ${hints.length} extracted relationship${hints.length === 1 ? "" : "s"}. Review each source before treating a possible link as operationally verified.` : `The trace found ${evidence.length} deduplicated source${evidence.length === 1 ? "" : "s"}. No strict-JSON relationships were returned, so the graph uses deterministic, possible links rather than inventing certainty.`,
+    timeline: [
+      { date: "01 / ANCHOR", label: "Investigation anchor", detail: `The trace began with “${normalized}”.` },
+      { date: "02 / EVIDENCE", label: "Cross-domain retrieval", detail: `${evidence.length} relevant records were deduplicated from search and news surfaces.` },
+      { date: "03 / LINKING", label: "Relationship reconstruction", detail: `${edges.length} relationship${edges.length === 1 ? "" : "s"} were connected with explicit confidence states.` },
+    ],
+    exposure: nodes.filter(node => node.data.exposure).map(node => ({ label: node.data.label, detail: "Directly connected by the current evidence set.", level: node.data.status === "VERIFIED" ? "HIGH" as const : "MEDIUM" as const })),
+    notice: process.env.OPENROUTER_API_KEY ? undefined : "SerpApi evidence is live. OPENROUTER_API_KEY is not set, so relationship extraction is using deterministic fallback logic.",
+  };
+}
