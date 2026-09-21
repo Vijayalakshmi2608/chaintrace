@@ -2,6 +2,16 @@
 
 > **Evidence first. Inference second.** CHAINTRACE reconstructs real-world dependency chains from live web evidence across events, companies, technologies, components, suppliers, products, and industries.
 
+## Product Preview
+
+![CHAINTRACE demo — landing page, live trace progress, and evidence-backed result](docs/media/chaintrace-demo.gif)
+
+| Landing experience | Live trace dashboard |
+|---|---|
+| ![CHAINTRACE landing page](docs/media/chaintrace-landing.webp) | ![CHAINTRACE live trace dashboard](docs/media/chaintrace-live-trace.webp) |
+
+The GIF shows the verified interface flow from query intake through live trace progress to the evidence-backed result dashboard. The live screenshot includes the graph, source ledger, trace report, and evidence-linked result state.
+
 ## Overview
 
 A real-world event rarely stays inside one category. A chip shortage can affect a supplier, a component, a manufacturer, and a downstream product at the same time. The difficult part is not finding isolated facts; it is connecting them while preserving the evidence trail.
