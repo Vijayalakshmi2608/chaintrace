@@ -1,7 +1,8 @@
 """CHAINTRACE production investigation API.
 
-This service is the source of truth for live investigations. It retrieves compact
-search/news evidence from SerpApi, makes one small OpenRouter/free extraction call,
+This service is the source of truth for live investigations. It routes each query
+to relevant SerpApi search, news, patents, jobs, and shopping verticals, retrieves
+compact evidence, makes one small OpenRouter/free extraction call,
 persists the complete result in SQLite, and returns only source-linked graph data.
 """
 from __future__ import annotations
@@ -22,6 +23,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("chaintrace")
+
+VERTICAL_ENGINES = {
+    "SEARCH": "google",
+    "NEWS": "google_news",
+    "PATENTS": "google_patents",
+    "JOBS": "google_jobs",
+    "SHOPPING": "google_shopping",
+}
+ENGINE_SOURCE_TYPES = {engine: source_type for source_type, engine in VERTICAL_ENGINES.items()}
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("SQLITE_PATH", ROOT / "chaintrace.sqlite"))
@@ -51,6 +61,22 @@ def compact(value: Any, limit: int = 240) -> str:
         value = value.get("name") or value.get("link") or "web source"
     value = " ".join(str(value or "").split())
     return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def route_verticals(query: str) -> list[str]:
+    """Select only the SerpApi surfaces relevant to the query context."""
+    normalized = query.lower()
+    if any(term in normalized for term in ("hire", "hiring", "job", "jobs", "career", "engineer", "engineering", "facility")):
+        return ["JOBS", "SEARCH", "NEWS"]
+    if any(term in normalized for term in ("patent", "ip licensing", "intellectual property", "invention", "technology", "semiconductor", "chip architecture")):
+        return ["SEARCH", "PATENTS", "NEWS"]
+    if any(term in normalized for term in ("disruption", "disrupted", "shortage", "earthquake", "war", "sanction", "shipping", "outage", "crisis")):
+        return ["NEWS", "SEARCH", "SHOPPING"]
+    if any(term in normalized for term in ("product", "component", "parts", "device", "hardware", "consumer")):
+        return ["SEARCH", "SHOPPING", "NEWS"]
+    if any(term in normalized for term in ("company", "supplier", "supply chain", "manufacturer", "vendor", "partnership")):
+        return ["SEARCH", "NEWS", "JOBS"]
+    return ["SEARCH", "NEWS"]
 
 
 def open_db() -> sqlite3.Connection:
@@ -139,10 +165,28 @@ async def serp_search(client: httpx.AsyncClient, query: str, engine: str) -> lis
         payload = response.json()
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"SerpApi request failed: {exc.__class__.__name__}") from exc
-    return payload.get("news_results" if engine == "google_news" else "organic_results", [])
+    result_key = {
+        "google_news": "news_results",
+        "google_patents": "organic_results",
+        "google_jobs": "jobs_results",
+        "google_shopping": "shopping_results",
+    }.get(engine, "organic_results")
+    return payload.get(result_key, [])
 
 
-def normalize_evidence(query: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def collect_vertical(client: httpx.AsyncClient, query: str, source_type: str) -> tuple[str, list[dict[str, Any]], str | None]:
+    engine = VERTICAL_ENGINES[source_type]
+    try:
+        return source_type, await asyncio.wait_for(serp_search(client, query, engine), timeout=15), None
+    except HTTPException as exc:
+        logger.warning("SerpApi vertical failed source_type=%s status=%s", source_type, exc.status_code)
+        return source_type, [], str(exc.detail)
+    except Exception as exc:
+        logger.warning("SerpApi vertical failed source_type=%s error=%s", source_type, exc.__class__.__name__)
+        return source_type, [], f"{exc.__class__.__name__}"
+
+
+def normalize_evidence(query: str, results: list[dict[str, Any]], source_type: str = "SEARCH") -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     for result in results:
@@ -150,18 +194,39 @@ def normalize_evidence(query: str, results: list[dict[str, Any]]) -> list[dict[s
         if not url or not url.startswith(("http://", "https://")) or url in seen_urls:
             continue
         seen_urls.add(url)
+        title = compact(result.get("title") or "Untitled source", 110)
         record = {
             "id": "ev-" + hashlib.md5(url.encode()).hexdigest()[:10],
+            "evidence_id": "ev-" + hashlib.md5(url.encode()).hexdigest()[:10],
             "title": compact(result.get("title") or "Untitled source", 110),
             "source": compact(result.get("source") or "web source", 100),
-            "sourceType": compact(result.get("source_type") or ("NEWS" if result.get("date") else "SEARCH"), 30),
+            "sourceType": source_type,
+            "source_type": source_type,
             "date": compact(result.get("date") or datetime.now(timezone.utc).date().isoformat(), 40),
             "snippet": compact(result.get("snippet") or "No snippet returned by source."),
             "status": "VERIFIED",
             "url": url,
+            "query": query,
         }
+        if not title:
+            continue
         records.append(record)
     return records[:10]
+
+
+def deduplicate_evidence(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for record in records:
+        url_key = record["url"].rstrip("/").lower()
+        title_key = " ".join(record["title"].lower().split())
+        if url_key in seen_urls or title_key in seen_titles:
+            continue
+        seen_urls.add(url_key)
+        seen_titles.add(title_key)
+        unique.append(record)
+    return unique[:20]
 
 
 async def extract_relationships(query: str, evidence: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
@@ -298,10 +363,21 @@ async def investigate(request: InvestigationRequest) -> dict[str, Any]:
         cached["cache"] = "HIT"
         return cached
 
-    logger.info("cache MISS query_hash=%s; requesting SerpApi evidence", query_hash(query))
+    if not os.getenv("SERPAPI_API_KEY"):
+        raise HTTPException(503, "SERPAPI_API_KEY is not configured")
+    routed_verticals = route_verticals(query)
+    logger.info("cache MISS query_hash=%s; routed SerpApi verticals=%s", query_hash(query), ",".join(routed_verticals))
     async with httpx.AsyncClient(timeout=12) as client:
-        search_results, news_results = await asyncio.gather(serp_search(client, query, "google"), serp_search(client, query, "google_news"))
-    evidence = normalize_evidence(query, [*search_results, *news_results])
+        collected = await asyncio.gather(*(collect_vertical(client, query, source_type) for source_type in routed_verticals))
+    evidence = deduplicate_evidence([
+        record
+        for source_type, results, _error in collected
+        for record in normalize_evidence(query, results, source_type)
+    ])
+    failed_verticals = [source_type for source_type, _results, error in collected if error]
+    successful_verticals = [source_type for source_type in routed_verticals if any(record["sourceType"] == source_type for record in evidence)]
+    if not evidence and failed_verticals:
+        raise HTTPException(502, f"All routed SerpApi verticals failed: {', '.join(failed_verticals)}")
     if not evidence:
         raise HTTPException(404, "No relevant sources with valid URLs were returned for this trace.")
 
@@ -311,6 +387,9 @@ async def investigate(request: InvestigationRequest) -> dict[str, Any]:
         "query": query,
         "mode": "live",
         "cache": "MISS",
+        "serpApiSources": successful_verticals,
+        "serpApiRouted": routed_verticals,
+        "serpApiFailures": failed_verticals,
         "investigationId": investigation_id(query_hash(query)),
         "nodes": nodes,
         "edges": edges,
@@ -318,9 +397,9 @@ async def investigate(request: InvestigationRequest) -> dict[str, Any]:
         "relationships": relationships,
         "metrics": {"entities": len(nodes), "relationships": len(edges), "sources": len(evidence), "conflicts": sum(1 for item in relationships if item["status"] == "CONFLICTING")},
         "report": (f"The trace found {len(evidence)} deduplicated source records and {len(edges)} source-linked relationships. Review the cited evidence before treating a possible link as operationally verified." if edges else f"The trace found {len(evidence)} deduplicated source records, but no source-linked relationships passed validation. No unsupported links were added."),
-        "timeline": [{"date": "01 / ANCHOR", "label": "Investigation anchor", "detail": f"The trace began with “{query}”."}, {"date": "02 / EVIDENCE", "label": "Cross-domain retrieval", "detail": f"{len(evidence)} relevant records were deduplicated from search and news surfaces."}, {"date": "03 / LINKING", "label": "Relationship reconstruction", "detail": f"{len(edges)} relationships passed evidence-ID validation."}],
+        "timeline": [{"date": "01 / ANCHOR", "label": "Investigation anchor", "detail": f"The trace began with “{query}”."}, {"date": "02 / EVIDENCE", "label": "Cross-domain retrieval", "detail": f"{len(evidence)} relevant records were deduplicated from {', '.join(successful_verticals)} surfaces."}, {"date": "03 / LINKING", "label": "Relationship reconstruction", "detail": f"{len(edges)} relationships passed evidence-ID validation."}],
         "exposure": [{"label": node["data"]["label"], "detail": "Directly supported by cited evidence.", "level": "HIGH" if node["data"]["status"] == "VERIFIED" else "MEDIUM"} for node in nodes if node["data"].get("exposure")],
-        "notice": notice,
+        "notice": " ".join(part for part in (notice, f"Some SerpApi verticals failed: {', '.join(failed_verticals)}." if failed_verticals else None) if part) or None,
     }
     store_investigation(query, payload)
     return payload

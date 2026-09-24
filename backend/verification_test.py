@@ -18,17 +18,22 @@ async def run() -> None:
         main.os.environ["OPENROUTER_MODEL"] = "openrouter/free"
         serp_calls = 0
         extraction_calls = 0
+        engines_seen: list[str] = []
 
         async def fake_serp(_client: object, query: str, engine: str) -> list[dict[str, object]]:
             nonlocal serp_calls
             serp_calls += 1
+            engines_seen.append(engine)
+            if query.startswith("partial failure") and engine == "google_jobs":
+                raise main.HTTPException(502, "jobs vertical unavailable")
             if query == "serp failure":
                 raise main.HTTPException(502, "SerpApi request failed")
             if query == "empty result":
                 return []
+            source_type = main.ENGINE_SOURCE_TYPES[engine]
             return [
-                {"title": "Anchor report", "link": "https://example.com/anchor", "snippet": "Anchor evidence", "source": "Example", "source_type": "SEARCH"},
-                {"title": "Duplicate anchor", "link": "https://example.com/anchor", "snippet": "Duplicate evidence", "source": "Example", "source_type": "NEWS"},
+                {"title": f"Anchor report {source_type}", "link": f"https://example.com/{source_type.lower()}", "snippet": "Anchor evidence", "source": "Example", "source_type": source_type},
+                {"title": f"Duplicate anchor {source_type}", "link": f"https://example.com/{source_type.lower()}", "snippet": "Duplicate evidence", "source": "Example", "source_type": source_type},
                 {"title": "Missing URL", "snippet": "Should be discarded", "source": "Example"},
             ]
 
@@ -50,9 +55,14 @@ async def run() -> None:
                 first_payload = first.json()
                 assert first_payload["cache"] == "MISS"
                 assert first_payload["investigationId"].startswith("CT-")
-                assert first_payload["metrics"]["sources"] == 1
+                assert first_payload["metrics"]["sources"] == 2
                 assert first_payload["metrics"]["relationships"] == 1
                 assert first_payload["edges"][0]["data"]["evidence_ids"] == [first_payload["evidence"][0]["id"]]
+                assert first_payload["evidence"][0]["evidence_id"] == first_payload["evidence"][0]["id"]
+                assert first_payload["evidence"][0]["sourceType"] == "SEARCH"
+                assert first_payload["evidence"][0]["query"] == "normal query"
+                assert first_payload["serpApiRouted"] == ["SEARCH", "NEWS"]
+                assert first_payload["serpApiSources"] == ["SEARCH", "NEWS"]
 
                 serp_before_cache = serp_calls
                 extraction_before_cache = extraction_calls
@@ -83,6 +93,24 @@ async def run() -> None:
                 assert router_failure.status_code == 200
                 assert router_failure.json()["metrics"]["relationships"] == 0
                 assert "malformed relationship response" in router_failure.json()["notice"]
+
+                for query, expected in (
+                    ("Acme supplier partnership", ["SEARCH", "NEWS", "JOBS"]),
+                    ("advanced chip architecture patents", ["SEARCH", "PATENTS", "NEWS"]),
+                    ("consumer product component shopping", ["SEARCH", "SHOPPING", "NEWS"]),
+                    ("engineering hiring at a semiconductor facility", ["JOBS", "SEARCH", "NEWS"]),
+                ):
+                    routed = await client.post("/api/investigate", json={"query": query})
+                    assert routed.status_code == 200
+                    assert routed.json()["serpApiRouted"] == expected
+                    assert routed.json()["serpApiSources"] == expected
+
+                partial = await client.post("/api/investigate", json={"query": "partial failure supplier"})
+                assert partial.status_code == 200
+                assert partial.json()["serpApiRouted"] == ["SEARCH", "NEWS", "JOBS"]
+                assert partial.json()["serpApiSources"] == ["SEARCH", "NEWS"]
+                assert partial.json()["serpApiFailures"] == ["JOBS"]
+                assert "JOBS" in partial.json()["notice"]
 
             assert main.os.environ["OPENROUTER_MODEL"] == "openrouter/free"
             valid = main.normalize_evidence("dedupe", [{"link": "https://example.com/a"}, {"link": "https://example.com/a"}, {"title": "no url"}])

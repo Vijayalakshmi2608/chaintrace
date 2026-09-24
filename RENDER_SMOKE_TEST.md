@@ -40,7 +40,7 @@ export QUERY="Nvidia Blackwell HBM supplier dependencies"
      --data "{\"query\":\"$QUERY\"}" > /tmp/chaintrace-first.json
    ```
 
-   Confirm `.cache` is `"MISS"`, `.mode` is `"live"`, `.evidence` contains source URLs, `.edges` contains evidence IDs, and `.report` is present. A `MISS` means SerpApi and the single compact OpenRouter extraction stage were eligible to run.
+   Confirm `.cache` is `"MISS"`, `.mode` is `"live"`, `.serpApiRouted` lists the context-selected verticals, `.serpApiSources` lists only verticals that returned normalized evidence, `.evidence` contains source URLs and source types, `.edges` contains evidence IDs, and `.report` is present. A `MISS` means the selected SerpApi stages and the single compact OpenRouter extraction stage were eligible to run.
 3. Submit the identical query again:
 
    ```bash
@@ -65,7 +65,7 @@ export QUERY="Nvidia Blackwell HBM supplier dependencies"
    PY
    ```
 
-5. In the FastAPI Render logs, confirm the first request contains `cache MISS`, `requesting SerpApi evidence`, `openrouter extraction model=openrouter/free`, and `cache STORED`. Confirm the repeated request contains only `cache HIT` for the same `query_hash`; it must not log another SerpApi or OpenRouter stage.
+5. In the FastAPI Render logs, confirm the first request contains `cache MISS`, the routed SerpApi vertical list, `openrouter extraction model=openrouter/free`, and `cache STORED`. If a selected vertical fails, the response should still contain successful evidence and list the failed vertical in `serpApiFailures`. Confirm the repeated request contains only `cache HIT` for the same `query_hash`; it must not log another SerpApi or OpenRouter stage.
 6. Confirm the Render Persistent Disk contains `/var/data/chaintrace.sqlite` after the first request and that a service restart still returns `cache HIT` for the identical query.
 
 ## Expected failure behavior

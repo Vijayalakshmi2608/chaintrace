@@ -18,7 +18,7 @@ The GIF shows the verified interface flow from query intake through live trace p
 
 A real-world event rarely stays inside one category. A chip shortage can affect a supplier, a component, a manufacturer, and a downstream product at the same time. The difficult part is not finding isolated facts; it is connecting them while preserving the evidence trail.
 
-CHAINTRACE turns a natural-language investigation query into a compact, source-backed dependency trace. It retrieves current Google Search and Google News results through SerpApi, removes duplicate or unusable records, asks OpenRouter's free router for strictly structured relationship candidates, validates every cited evidence ID, stores the complete result in SQLite, and renders the result as an interactive React Flow graph with an evidence ledger, exposure view, timeline, and report.
+CHAINTRACE turns a natural-language investigation query into a compact, source-backed dependency trace. It deterministically routes each query to relevant Google Search, Google News, Google Patents, Google Jobs, and Google Shopping SerpApi verticals, removes duplicate or unusable records, asks OpenRouter's free router for strictly structured relationship candidates, validates every cited evidence ID, stores the complete result in SQLite, and renders the result as an interactive React Flow graph with an evidence ledger, exposure view, timeline, and report.
 
 ## Why CHAINTRACE
 
@@ -35,7 +35,7 @@ Vite + React frontend
     ↓
 FastAPI /api/investigate
     ↓
-SerpApi: Google Search + Google News
+    SerpApi verticals selected by query context
     ↓
 URL validation, deduplication, compact evidence records
     ↓
@@ -63,7 +63,8 @@ For local preview compatibility, the Node/Express host also contains a legacy in
 | **Source Provenance** | Every accepted relationship carries one or more `evidence_ids`; each ID maps to a stored source record. |
 | **Evidence Status** | `VERIFIED`, `POSSIBLE`, and `CONFLICTING` are supported for relationship and graph status. |
 | **Caching** | Identical queries are keyed by a normalized SHA-1 query hash and return a SQLite cache `HIT` without repeating upstream calls. |
-| **Evidence Filters** | The UI can filter retrieved records by the available source-type labels, including Search and News when present. |
+| **Evidence Filters** | The UI can filter retrieved records by the available source-type labels, including Search, News, Patents, Jobs, and Shopping when present. |
+| **SerpApi Evidence Sources** | Live results show only the SerpApi verticals that actually returned evidence, with partial failures called out without discarding successful sources. |
 | **Saved / Reopen** | Investigations receive stable IDs, appear in recent history, and can be reopened from SQLite. |
 | **Comparison** | Two stored investigations can be compared for shared entities, unique entities, and shared relationship labels. |
 | **Exports** | The UI provides client-side PDF trace-report and CSV evidence-ledger downloads. |
@@ -78,9 +79,12 @@ flowchart LR
     FE -->|history, reopen, compare| API
     API --> CACHE{SQLite query cache}
     CACHE -->|HIT| RESULT[Stored investigation payload]
-    CACHE -->|MISS| SERP[SerpApi]
+    CACHE -->|MISS| SERP[SerpApi context router]
     SERP --> SEARCH[Google Search]
     SERP --> NEWS[Google News]
+    SERP --> PATENTS[Google Patents]
+    SERP --> JOBS[Google Jobs]
+    SERP --> SHOPPING[Google Shopping]
     SEARCH --> NORM[Normalize, validate URLs, deduplicate]
     NEWS --> NORM
     NORM --> AI[OpenRouter/free\nstrict JSON schema\nmax_tokens 1200]
@@ -100,7 +104,7 @@ flowchart LR
 | Graph | `@xyflow/react` / React Flow |
 | API | FastAPI 0.115, Uvicorn, Pydantic 2, HTTPX |
 | Local host / proxy | Node.js, Express, TypeScript, tRPC scaffold |
-| Retrieval | SerpApi Google Search and Google News engines |
+| Retrieval | SerpApi Google Search, Google News, Google Patents, Google Jobs, and Google Shopping engines |
 | Structured extraction | OpenRouter API with `OPENROUTER_MODEL=openrouter/free` |
 | Persistence | SQLite via Python's standard-library `sqlite3` module |
 | Deployment | Render Blueprint, Python web service, static Vite frontend, Render Persistent Disk |
@@ -108,12 +112,24 @@ flowchart LR
 
 ## SerpApi Integration
 
-The production FastAPI service makes two concurrent SerpApi requests for a cache miss:
+The production FastAPI service uses deterministic query-context routing for a cache miss. It runs the selected verticals concurrently and does not call every vertical for every query:
 
-1. `engine=google` reads `organic_results` for general web evidence.
-2. `engine=google_news` reads `news_results` for news evidence.
+1. **Company / supplier** → Google Search, Google News, Google Jobs.
+2. **Technology / IP** → Google Search, Google Patents, Google News.
+3. **Product / component** → Google Search, Google Shopping, Google News.
+4. **Hiring / engineering** → Google Jobs, Google Search, Google News.
+5. **Disruption** → Google News, Google Search, Google Shopping.
+6. **Unclassified query** → Google Search and Google News.
 
-Each record must contain an `http://` or `https://` URL. Records are normalized to a compact shape containing an evidence ID, title, source, source type, date, snippet, status, and URL. Duplicate URLs are removed and the final evidence set is capped at 10 records. The current backend does not call SerpApi patents, jobs, shopping, or other engines; those labels exist only as UI filter vocabulary for matching source-type records if supplied by a future retrieval surface.
+| Vertical | SerpApi engine | Result collection |
+|---|---|---|
+| `SEARCH` | `google` | `organic_results` |
+| `NEWS` | `google_news` | `news_results` |
+| `PATENTS` | `google_patents` | `organic_results` |
+| `JOBS` | `google_jobs` | `jobs_results` |
+| `SHOPPING` | `google_shopping` | `shopping_results` |
+
+Each record is normalized to `evidence_id`, title, URL, `source_type`, date, snippet, and the originating query. Records without valid HTTP(S) URLs are discarded. Duplicate URLs and duplicate titles are removed, and the response exposes the verticals that returned evidence plus any individual vertical failures. A failure in one selected vertical does not discard successful evidence from the others; if every selected call fails, the API returns an upstream error.
 
 ## OpenRouter Integration
 
@@ -132,8 +148,8 @@ The API accepts only relationships whose `subject`, `object`, and `evidence_ids`
 1. The user submits a query of 3–240 characters from the React frontend.
 2. FastAPI normalizes the query and checks SQLite using a lowercase, trimmed SHA-1 hash.
 3. A cache `HIT` returns the stored payload without calling SerpApi or OpenRouter.
-4. On a `MISS`, FastAPI requests Google Search and Google News results concurrently through SerpApi.
-5. Results without valid URLs are discarded; duplicate URLs are removed and records are compacted.
+4. On a `MISS`, FastAPI routes the query to relevant SerpApi verticals and requests them concurrently.
+5. Results without valid URLs are discarded; duplicate URLs and titles are removed and records are compacted with their vertical source type.
 6. Up to eight compact evidence records are sent in one structured OpenRouter/free request.
 7. Returned relationships are validated against real evidence IDs, confidence, and allowed status values.
 8. React Flow nodes and edges are created only from validated relationships.

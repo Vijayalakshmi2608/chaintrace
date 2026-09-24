@@ -14,6 +14,7 @@ type SearchResult = {
 
 type Evidence = {
   id: string;
+  evidence_id: string;
   title: string;
   source: string;
   sourceType: string;
@@ -21,6 +22,7 @@ type Evidence = {
   snippet: string;
   status: TraceStatus;
   url: string;
+  query: string;
 };
 
 type TraceNode = {
@@ -61,17 +63,39 @@ function sourceLabel(source: SearchResult["source"], url: string) {
   try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "web source"; }
 }
 
-async function searchSerpApi(query: string, engine: "google" | "google_news") {
+const VERTICAL_ENGINES = {
+  SEARCH: "google",
+  NEWS: "google_news",
+  PATENTS: "google_patents",
+  JOBS: "google_jobs",
+  SHOPPING: "google_shopping",
+} as const;
+
+function routeVerticals(query: string): (keyof typeof VERTICAL_ENGINES)[] {
+  const normalized = query.toLowerCase();
+  if (/(hire|hiring|job|jobs|career|engineer|engineering|facility)/.test(normalized)) return ["JOBS", "SEARCH", "NEWS"];
+  if (/(patent|ip licensing|intellectual property|invention|technology|semiconductor|chip architecture)/.test(normalized)) return ["SEARCH", "PATENTS", "NEWS"];
+  if (/(disruption|disrupted|shortage|earthquake|war|sanction|shipping|outage|crisis)/.test(normalized)) return ["NEWS", "SEARCH", "SHOPPING"];
+  if (/(product|component|parts|device|hardware|consumer)/.test(normalized)) return ["SEARCH", "SHOPPING", "NEWS"];
+  if (/(company|supplier|supply chain|manufacturer|vendor|partnership)/.test(normalized)) return ["SEARCH", "NEWS", "JOBS"];
+  return ["SEARCH", "NEWS"];
+}
+
+type Vertical = keyof typeof VERTICAL_ENGINES;
+
+async function searchSerpApi(query: string, sourceType: Vertical) {
+  const engine = VERTICAL_ENGINES[sourceType];
   const key = process.env.SERPAPI_API_KEY;
   if (!key) return [] as SearchResult[];
   const params = new URLSearchParams({ engine, q: query, api_key: key, num: "6", hl: "en" });
   try {
     const response = await fetch(`https://serpapi.com/search.json?${params.toString()}`, { signal: AbortSignal.timeout(12000) });
     if (!response.ok) return [];
-    const payload = await response.json() as { organic_results?: SearchResult[]; news_results?: SearchResult[] };
-    return engine === "google_news" ? (payload.news_results ?? []) : (payload.organic_results ?? []);
+    const payload = await response.json() as { organic_results?: SearchResult[]; news_results?: SearchResult[]; jobs_results?: SearchResult[]; shopping_results?: SearchResult[] };
+    const resultKey = sourceType === "NEWS" ? "news_results" : sourceType === "JOBS" ? "jobs_results" : sourceType === "SHOPPING" ? "shopping_results" : "organic_results";
+    return payload[resultKey] ?? [];
   } catch {
-    return [];
+    throw new Error(`${sourceType} vertical unavailable`);
   }
 }
 
@@ -111,22 +135,28 @@ async function extractRelationshipHints(query: string, evidence: Evidence[]) {
   }
 }
 
-function buildEvidence(results: SearchResult[]) {
-  const seen = new Set<string>();
+function buildEvidence(query: string, results: Array<{ result: SearchResult; sourceType: Vertical }>) {
+  const seenUrls = new Set<string>();
+  const seenTitles = new Set<string>();
   const records: Evidence[] = [];
-  for (const result of results) {
+  for (const { result, sourceType } of results) {
     const url = result.link?.trim();
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
+    const title = clampText(result.title || "Untitled source", 110);
+    if (!url || !/^https?:\/\//.test(url) || seenUrls.has(url) || seenTitles.has(title.toLowerCase())) continue;
+    seenUrls.add(url);
+    seenTitles.add(title.toLowerCase());
+    const id = `ev-${crypto.createHash("md5").update(url).digest("hex").slice(0, 10)}`;
     records.push({
-      id: `ev-${crypto.createHash("md5").update(url).digest("hex").slice(0, 10)}`,
-      title: clampText(result.title || "Untitled source", 110),
+      id,
+      evidence_id: id,
+      title,
       source: sourceLabel(result.source, url),
-      sourceType: result.source_type || (result.date ? "NEWS" : "SEARCH"),
+      sourceType,
       date: result.date || new Date().toISOString().slice(0, 10),
       snippet: clampText(result.snippet || "No snippet returned by source."),
       status: "VERIFIED",
       url,
+      query,
     });
   }
   return records.slice(0, 10);
@@ -142,8 +172,17 @@ export async function investigate(query: string) {
     throw error;
   }
 
-  const [searchResults, newsResults] = await Promise.all([searchSerpApi(normalized, "google"), searchSerpApi(normalized, "google_news")]);
-  const evidence = buildEvidence([...searchResults, ...newsResults]);
+  const serpApiRouted = routeVerticals(normalized);
+  const verticalResults = await Promise.all(serpApiRouted.map(async sourceType => {
+    try {
+      return { sourceType, results: await searchSerpApi(normalized, sourceType), failed: false };
+    } catch {
+      return { sourceType, results: [] as SearchResult[], failed: true };
+    }
+  }));
+  const evidence = buildEvidence(normalized, verticalResults.flatMap(item => item.results.map(result => ({ result, sourceType: item.sourceType }))));
+  const serpApiFailures = verticalResults.filter(item => item.failed).map(item => item.sourceType);
+  const serpApiSources = Array.from(new Set(evidence.map(item => item.sourceType)));
   if (evidence.length === 0) {
     const error = new Error("No relevant sources were returned for this trace. Try a more specific query.");
     (error as Error & { code?: string }).code = "EMPTY_RESULTS";
@@ -170,6 +209,9 @@ export async function investigate(query: string) {
   return {
     query: normalized,
     mode: "live" as const,
+    serpApiSources,
+    serpApiRouted,
+    serpApiFailures,
     nodes,
     edges,
     evidence,
@@ -177,10 +219,10 @@ export async function investigate(query: string) {
     report: hints.length > 0 ? `The current evidence set supports ${hints.length} extracted relationship${hints.length === 1 ? "" : "s"}. Review each source before treating a possible link as operationally verified.` : `The trace found ${evidence.length} deduplicated source${evidence.length === 1 ? "" : "s"}, but no source-linked relationships passed validation. No unsupported links were added.`,
     timeline: [
       { date: "01 / ANCHOR", label: "Investigation anchor", detail: `The trace began with “${normalized}”.` },
-      { date: "02 / EVIDENCE", label: "Cross-domain retrieval", detail: `${evidence.length} relevant records were deduplicated from search and news surfaces.` },
+      { date: "02 / EVIDENCE", label: "Cross-domain retrieval", detail: `${evidence.length} relevant records were deduplicated from ${serpApiSources.join(", ")} surfaces.` },
       { date: "03 / LINKING", label: "Relationship reconstruction", detail: `${edges.length} relationship${edges.length === 1 ? "" : "s"} were connected with explicit confidence states.` },
     ],
     exposure: nodes.filter(node => node.data.exposure).map(node => ({ label: node.data.label, detail: "Directly connected by the current evidence set.", level: node.data.status === "VERIFIED" ? "HIGH" as const : "MEDIUM" as const })),
-    notice: process.env.OPENROUTER_API_KEY ? undefined : "SerpApi evidence is live. OPENROUTER_API_KEY is not set, so relationship extraction is using deterministic fallback logic.",
+    notice: [!process.env.OPENROUTER_API_KEY ? "SerpApi evidence is live. OPENROUTER_API_KEY is not set, so relationship extraction is using deterministic fallback logic." : "", serpApiFailures.length > 0 ? `Some SerpApi verticals failed: ${serpApiFailures.join(", ")}.` : ""].filter(Boolean).join(" ") || undefined,
   };
 }
