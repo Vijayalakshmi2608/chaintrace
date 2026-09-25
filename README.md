@@ -45,7 +45,7 @@ Evidence-ID validation + SQLite persistence/cache
     ↓
 React Flow dependency graph
     ↓
-Evidence ledger, exposure view, timeline, sources, and report
+    Evidence ledger, node/edge spotlight, exposure view, timeline, sources, and report
 ```
 
 For local preview compatibility, the Node/Express host also contains a legacy investigation path. When `FASTAPI_API_URL` is configured, its investigation and saved-investigation routes proxy to FastAPI. In the deployed architecture, the frontend uses `VITE_API_BASE_URL` to call the FastAPI service directly.
@@ -62,6 +62,9 @@ For local preview compatibility, the Node/Express host also contains a legacy in
 | **Timeline** | The result includes investigation anchor, evidence retrieval, and relationship-linking stages. |
 | **Source Provenance** | Every accepted relationship carries one or more `evidence_ids`; each ID maps to a stored source record. |
 | **Evidence Status** | `VERIFIED`, `POSSIBLE`, and `CONFLICTING` are supported for relationship and graph status. |
+| **Node Spotlight** | Clicking a graph node highlights its connected relationships and opens the related SQLite-backed evidence in the sidebar. |
+| **Edge Spotlight** | Clicking a relationship edge shows Entity A, relationship, Entity B, status, confidence, description, and supporting source records. |
+| **Conflict Detection** | Deterministic checks identify explicit competing exclusive supplier/manufacturer claims and display the competing evidence side-by-side. |
 | **Caching** | Identical queries are keyed by a normalized SHA-1 query hash and return a SQLite cache `HIT` without repeating upstream calls. |
 | **Evidence Filters** | The UI can filter retrieved records by the available source-type labels, including Search, News, Patents, Jobs, and Shopping when present. |
 | **SerpApi Evidence Sources** | Live results show only the SerpApi verticals that actually returned evidence, with partial failures called out without discarding successful sources. |
@@ -168,6 +171,12 @@ Relationship status values are constrained to:
 
 The backend drops relationships with missing entities or missing/invalid evidence IDs. It does not synthesize unsupported edges when OpenRouter fails, returns malformed JSON, or returns no usable relationships.
 
+## Node and Edge Spotlight
+
+The graph is an evidence navigation surface, not only a visual summary. Select a node to highlight its connected relationships and narrow the evidence sidebar to records that mention or support that entity. Select an edge to inspect the directed relationship in context, including its status, confidence, relationship description, source types, dates, snippets, evidence IDs, and original URLs. Source links open the retrieved publisher or listing in a separate browser tab.
+
+Conflict detection is intentionally conservative. The backend marks a relationship `CONFLICTING` only when retrieved evidence contains explicit competing exclusive claims, such as two different entities each described as the primary supplier or sole manufacturer for the same target. Different wording, multiple suppliers, or ordinary source disagreement is not treated as a conflict. When a conflict is detected, the spotlight panel presents the competing claims side-by-side and preserves each source record.
+
 ## API Configuration
 
 Create a local `.env` file or configure the equivalent Render environment variables. Use placeholders only; never commit real keys.
@@ -259,7 +268,7 @@ python3 backend/verification_test.py
 python3 render_yaml_check.py
 ```
 
-`pnpm test` runs the Vitest suite for authentication logout behavior, credential reachability, and the Node investigation contract. The FastAPI verification script covers the live production-flow contract and failure cases including empty results, SerpApi failures, OpenRouter failures, malformed JSON, duplicate evidence, missing source URLs, evidence-ID validation, cache behavior, stable IDs, reopening, and comparison. The credential test reaches SerpApi and OpenRouter using server-side environment variables; it does not print secret values.
+`pnpm test` runs the Vitest suite for authentication logout behavior, credential reachability, and the Node investigation contract. The FastAPI verification script covers the live production-flow contract and failure cases including empty results, SerpApi failures, OpenRouter failures, malformed JSON, duplicate evidence, missing source URLs, evidence-ID validation, cache behavior, stable IDs, reopening, comparison, conflict detection, and graph status propagation. Browser verification also covers node spotlight, edge spotlight, source-link behavior, status display, and preservation of existing graph interactions. The credential test reaches SerpApi and OpenRouter using server-side environment variables; it does not print secret values.
 
 ## Production Build
 
@@ -306,7 +315,7 @@ chaintrace/
 │   ├── verification_test.py    # Production-flow and failure-case verification
 │   └── disk_path_check.py      # Persistent-disk path check
 ├── client/
-│   ├── src/pages/Home.tsx      # Landing page, live flow, graph, ledger, exports, history
+│   ├── src/pages/Home.tsx      # Landing page, live flow, graph, spotlight, ledger, exports, history
 │   ├── src/index.css           # Dark intelligence-console design system
 │   └── src/App.tsx             # Application shell and routes
 ├── server/
@@ -324,7 +333,7 @@ chaintrace/
 1. Open CHAINTRACE and choose a real investigation such as `Apple TSMC supplier relationship` or `Nvidia Blackwell HBM supplier dependencies`.
 2. Submit the query and show the staged live trace while FastAPI retrieves Google Search and Google News evidence.
 3. Review the dependency graph and explain that live edges appear only when OpenRouter's structured output cites valid evidence IDs.
-4. Open the evidence ledger, inspect a source URL, and switch to the exposure and timeline views.
+4. Click a graph node to spotlight connected evidence, click an edge to inspect its relationship details, open a source URL, and switch to the exposure and timeline views.
 5. Copy or save the investigation ID, reopen it from recent investigations, and demonstrate that the identical request returns from SQLite without repeating upstream calls.
 6. Optionally export the trace report as PDF or the evidence ledger as CSV.
 
@@ -334,7 +343,7 @@ The landing-page sample trace is explicitly illustrative. It must not be present
 
 - `openrouter/free` is a free router and its provider/model selection and extraction quality can vary. A live request can legitimately return evidence with zero validated relationships.
 - SerpApi availability, quotas, latency, and result quality affect live investigations.
-- Search/news coverage is limited to the two currently implemented SerpApi engines; the UI vocabulary includes additional source-type filters, but the backend does not query those additional engines today.
+- Conflict detection is deliberately conservative and focuses on explicit exclusive supplier/manufacturer claims; subtle or implicit disagreements require manual review.
 - SQLite is appropriate for this single-service, disk-backed deployment and cache workload, but it is not a substitute for a horizontally scalable multi-writer database.
 - The graph reflects retrieved evidence and validated extraction output, not a guaranteed exhaustive view of the real world.
 - The frontend production bundle currently emits a Vite chunk-size warning; the build still completes successfully.
@@ -362,7 +371,7 @@ This repository declares the **MIT License** in `package.json`. Add the standard
 
 ## Acknowledgements
 
-CHAINTRACE uses [SerpApi](https://serpapi.com/) for Google Search and Google News retrieval, [OpenRouter](https://openrouter.ai/) for structured relationship extraction through `openrouter/free`, [FastAPI](https://fastapi.tiangolo.com/) and [Uvicorn](https://www.uvicorn.org/) for the Python API, [React](https://react.dev/), [Vite](https://vite.dev/), and [Tailwind CSS](https://tailwindcss.com/) for the frontend, [React Flow](https://reactflow.dev/) for graph visualization, and [SQLite](https://www.sqlite.org/) for local and disk-backed persistence.
+CHAINTRACE uses [SerpApi](https://serpapi.com/) for Google Search, Google News, Google Patents, Google Jobs, and Google Shopping retrieval, [OpenRouter](https://openrouter.ai/) for structured relationship extraction through `openrouter/free`, [FastAPI](https://fastapi.tiangolo.com/) and [Uvicorn](https://www.uvicorn.org/) for the Python API, [React](https://react.dev/), [Vite](https://vite.dev/), and [Tailwind CSS](https://tailwindcss.com/) for the frontend, [React Flow](https://reactflow.dev/) for graph visualization, and [SQLite](https://www.sqlite.org/) for local and disk-backed persistence.
 
 ---
 
