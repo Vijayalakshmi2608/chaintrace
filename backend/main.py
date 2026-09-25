@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -252,6 +253,7 @@ async def extract_relationships(query: str, evidence: list[dict[str, Any]]) -> t
                         "evidence_ids": {"type": "array", "items": {"type": "string"}},
                         "confidence": {"type": "number"},
                         "status": {"type": "string", "enum": ["VERIFIED", "POSSIBLE", "CONFLICTING"]},
+                        "description": {"type": "string"},
                     },
                     "required": ["subject", "object", "relationship_type", "evidence_ids", "confidence", "status"],
                     "additionalProperties": False,
@@ -293,8 +295,46 @@ async def extract_relationships(query: str, evidence: list[dict[str, Any]]) -> t
         status = item.get("status") if item.get("status") in {"VERIFIED", "POSSIBLE", "CONFLICTING"} else "POSSIBLE"
         if status == "VERIFIED" and confidence < 0.75:
             status = "POSSIBLE"
-        clean.append({"subject": subject, "object": obj, "relationship_type": compact(item.get("relationship_type") or "connected to", 60), "evidence_ids": evidence_ids, "confidence": max(0, min(confidence, 1)), "status": status})
+        clean.append({"subject": subject, "object": obj, "relationship_type": compact(item.get("relationship_type") or "connected to", 60), "evidence_ids": evidence_ids, "confidence": max(0, min(confidence, 1)), "status": status, "description": compact(item.get("description") or "Supported by the cited evidence.", 220)})
     return clean[:12], None
+
+
+def _relationship_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def detect_conflicts(relationships: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flag only explicit competing exclusive supplier/manufacturing claims.
+
+    Multiple suppliers are not a conflict by themselves. A conflict requires two
+    distinct targets in the same subject/relationship group, with evidence that
+    explicitly uses exclusive wording such as primary, sole, main, or exclusive.
+    """
+    by_id = {item["id"]: item for item in evidence}
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for relationship in relationships:
+        relation_key = _relationship_key(relationship.get("relationship_type", ""))
+        if not re.search(r"suppl|manufactur|primary source|sole source", relation_key):
+            continue
+        claim_text = " ".join(
+            f"{by_id[item_id].get('title', '')} {by_id[item_id].get('snippet', '')}"
+            for item_id in relationship.get("evidence_ids", [])
+            if item_id in by_id
+        ).lower()
+        if not re.search(r"\b(primary|sole|main|exclusive|only)\b.{0,45}\b(supplier|source|manufacturer|provider)\b", claim_text):
+            continue
+        groups.setdefault((_relationship_key(relationship.get("subject", "")), relation_key), []).append(relationship)
+
+    for candidates in groups.values():
+        targets = {_relationship_key(item.get("object", "")) for item in candidates}
+        if len(targets) < 2:
+            continue
+        for relationship in candidates:
+            relationship["status"] = "CONFLICTING"
+            relationship["conflict_group"] = f"{_relationship_key(relationship.get('subject', ''))}:{_relationship_key(relationship.get('relationship_type', ''))}"
+            relationship["conflict_with"] = [item.get("object") for item in candidates if item is not relationship]
+            relationship["description"] = "Competing exclusive claims were found in the cited evidence; review both sides before treating either as primary."
+    return relationships
 
 
 def build_graph(query: str, evidence: list[dict[str, Any]], relationships: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -307,7 +347,7 @@ def build_graph(query: str, evidence: list[dict[str, Any]], relationships: list[
         for entity_id, label in ((subject_id, relationship["subject"]), (object_id, relationship["object"])):
             if entity_id not in nodes:
                 nodes[entity_id] = {"id": entity_id, "type": "trace", "position": {"x": 335 + (index % 2) * 300, "y": 90 + (index // 2) * 150}, "data": {"label": label, "kind": "ENTITY", "status": relationship["status"], "evidence": len(relationship["evidence_ids"]), "exposure": relationship["status"] == "VERIFIED"}}
-        edges.append({"id": f"edge-{index}-{subject_id}-{object_id}", "source": subject_id, "target": object_id, "type": "smoothstep", "label": relationship["relationship_type"], "data": {"label": relationship["relationship_type"], "status": relationship["status"], "evidence_ids": relationship["evidence_ids"], "confidence": relationship["confidence"]}, "animated": index == 0})
+        edges.append({"id": f"edge-{index}-{subject_id}-{object_id}", "source": subject_id, "target": object_id, "type": "smoothstep", "label": relationship["relationship_type"], "data": {"label": relationship["relationship_type"], "status": relationship["status"], "evidence_ids": relationship["evidence_ids"], "confidence": relationship["confidence"], "description": relationship.get("description"), "conflict_with": relationship.get("conflict_with", [])}, "animated": index == 0})
     return list(nodes.values()), edges
 
 
@@ -382,6 +422,7 @@ async def investigate(request: InvestigationRequest) -> dict[str, Any]:
         raise HTTPException(404, "No relevant sources with valid URLs were returned for this trace.")
 
     relationships, notice = await extract_relationships(query, evidence)
+    relationships = detect_conflicts(relationships, evidence)
     nodes, edges = build_graph(query, evidence, relationships)
     payload: dict[str, Any] = {
         "query": query,

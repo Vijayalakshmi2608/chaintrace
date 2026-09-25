@@ -116,6 +116,28 @@ async def run() -> None:
             valid = main.normalize_evidence("dedupe", [{"link": "https://example.com/a"}, {"link": "https://example.com/a"}, {"title": "no url"}])
             assert len(valid) == 1
 
+            conflict_evidence = [
+                {"id": "E1", "title": "Supplier A primary source", "snippet": "Anchor names Supplier A as its primary supplier.", "url": "https://example.com/a"},
+                {"id": "E2", "title": "Supplier B primary source", "snippet": "Anchor names Supplier B as its primary supplier.", "url": "https://example.com/b"},
+            ]
+            conflicting = main.detect_conflicts([
+                {"subject": "Anchor", "object": "Supplier A", "relationship_type": "supplied by", "evidence_ids": ["E1"], "confidence": 0.9, "status": "VERIFIED"},
+                {"subject": "Anchor", "object": "Supplier B", "relationship_type": "supplied by", "evidence_ids": ["E2"], "confidence": 0.9, "status": "VERIFIED"},
+            ], conflict_evidence)
+            assert [item["status"] for item in conflicting] == ["CONFLICTING", "CONFLICTING"]
+            assert conflicting[0]["conflict_with"] == ["Supplier B"]
+            _conflict_nodes, conflict_edges = main.build_graph("Anchor supplier", conflict_evidence, conflicting)
+            assert all(edge["data"]["status"] == "CONFLICTING" for edge in conflict_edges)
+
+            non_conflicting = main.detect_conflicts([
+                {"subject": "Anchor", "object": "Supplier A", "relationship_type": "supplied by", "evidence_ids": ["E1"], "confidence": 0.9, "status": "VERIFIED"},
+                {"subject": "Anchor", "object": "Supplier B", "relationship_type": "supplied by", "evidence_ids": ["E2"], "confidence": 0.9, "status": "VERIFIED"},
+            ], [
+                {"id": "E1", "title": "Supplier A", "snippet": "Supplier A supplies one component.", "url": "https://example.com/a"},
+                {"id": "E2", "title": "Supplier B", "snippet": "Supplier B supplies another component.", "url": "https://example.com/b"},
+            ])
+            assert all(item["status"] == "VERIFIED" for item in non_conflicting)
+
             class FakeResponse:
                 def raise_for_status(self) -> None:
                     return None
