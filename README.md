@@ -65,6 +65,7 @@ For local preview compatibility, the Node/Express host also contains a legacy in
 | **Node Spotlight** | Clicking a graph node highlights its connected relationships and opens the related SQLite-backed evidence in the sidebar. |
 | **Edge Spotlight** | Clicking a relationship edge shows Entity A, relationship, Entity B, status, confidence, description, and supporting source records. |
 | **Conflict Detection** | Deterministic checks identify explicit competing exclusive supplier/manufacturer claims and display the competing evidence side-by-side. |
+| **Cascade Impact View** | A selected node can explore validated one-hop and two-hop dependency paths with direct/indirect labels, status filters, graph highlighting, and existing evidence-panel inspection. |
 | **Caching** | Identical queries are keyed by a normalized SHA-1 query hash and return a SQLite cache `HIT` without repeating upstream calls. |
 | **Evidence Filters** | The UI can filter retrieved records by the available source-type labels, including Search, News, Patents, Jobs, and Shopping when present. |
 | **SerpApi Evidence Sources** | Live results show only the SerpApi verticals that actually returned evidence, with partial failures called out without discarding successful sources. |
@@ -177,6 +178,12 @@ The graph is an evidence navigation surface, not only a visual summary. Select a
 
 Conflict detection is intentionally conservative. The backend marks a relationship `CONFLICTING` only when retrieved evidence contains explicit competing exclusive claims, such as two different entities each described as the primary supplier or sole manufacturer for the same target. Different wording, multiple suppliers, or ordinary source disagreement is not treated as a conflict. When a conflict is detected, the spotlight panel presents the competing claims side-by-side and preserves each source record.
 
+## Cascade Impact Analysis
+
+Select any graph node and choose **Explore cascade** to inspect its connected dependency paths. The view supports one-hop direct connections and two-hop indirect paths, with filters for hop depth and relationship status. Selecting a path reuses the existing Edge Spotlight and evidence ledger; it does not make new SerpApi or OpenRouter requests.
+
+Cascade analysis is a connected-path view, not a forecast. It uses only existing validated graph edges, preserves each relationship's original direction and `evidence_ids`, labels indirect paths explicitly, and never invents impact estimates, future outcomes, probabilities, or financial-loss predictions. If no validated paths match the selected controls, the interface shows an insufficient-evidence empty state.
+
 ## API Configuration
 
 Create a local `.env` file or configure the equivalent Render environment variables. Use placeholders only; never commit real keys.
@@ -268,7 +275,7 @@ python3 backend/verification_test.py
 python3 render_yaml_check.py
 ```
 
-`pnpm test` runs the Vitest suite for authentication logout behavior, credential reachability, and the Node investigation contract. The FastAPI verification script covers the live production-flow contract and failure cases including empty results, SerpApi failures, OpenRouter failures, malformed JSON, duplicate evidence, missing source URLs, evidence-ID validation, cache behavior, stable IDs, reopening, comparison, conflict detection, and graph status propagation. Browser verification also covers node spotlight, edge spotlight, source-link behavior, status display, and preservation of existing graph interactions. The credential test reaches SerpApi and OpenRouter using server-side environment variables; it does not print secret values.
+`pnpm test` runs the Vitest suite for authentication logout behavior, credential reachability, the Node investigation contract, and cascade traversal. The FastAPI verification script covers the live production-flow contract and failure cases including empty results, SerpApi failures, OpenRouter failures, malformed JSON, duplicate evidence, missing source URLs, evidence-ID validation, cache behavior, stable IDs, reopening, comparison, conflict detection, and graph status propagation. Browser verification also covers node spotlight, edge spotlight, cascade one-hop/two-hop paths, direct/indirect labels, filters, source-link behavior, status display, and preservation of existing graph interactions. The credential test reaches SerpApi and OpenRouter using server-side environment variables; it does not print secret values.
 
 ## Production Build
 

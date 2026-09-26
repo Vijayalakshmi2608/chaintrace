@@ -236,3 +236,28 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .spotlight-evidence-row:hover, .spotlight-evidence-row.selected { border-color: rgba(85,214,209,.3); background: rgba(85,214,209,.06); }
 .spotlight-evidence-row > span:nth-child(2) { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }.spotlight-evidence-row strong { overflow: hidden; color: #cfe3ee; font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }.spotlight-evidence-row small { color: #607b94; font-size: 9px; }
 @media (max-width: 650px) { .spotlight-banner { margin-left: 0; margin-right: 0; }.spotlight-edge-details { margin-left: 0; margin-right: 0; }.conflict-claim-grid { grid-template-columns: 1fr; } }
+
+/* Feature 3: evidence-backed cascade exploration. */
+.spotlight-action { margin-left: auto; padding: 5px 8px; border: 1px solid rgba(85,214,209,.32); border-radius: 4px; color: #b9f4ee; background: rgba(85,214,209,.08); font-family: "Space Grotesk", sans-serif; font-size: 9px; letter-spacing: .04em; }
+.spotlight-action:hover { border-color: rgba(85,214,209,.7); background: rgba(85,214,209,.16); }
+.react-flow__edge.cascade-edge .react-flow__edge-path { stroke: #a78bfa; stroke-width: 3; filter: drop-shadow(0 0 6px rgba(167,139,250,.7)); }
+.cascade-panel { margin: 12px 13px 0; padding: 14px; border: 1px solid rgba(167,139,250,.3); border-radius: 7px; background: linear-gradient(135deg, rgba(37,28,68,.48), rgba(11,25,41,.78)); }
+.cascade-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
+.cascade-head svg { flex: 0 0 auto; color: #b8a3ff; }
+.cascade-head h3 { margin: 4px 0 0; color: #f0ecff; font-size: 15px; font-weight: 500; }
+.cascade-head p { margin: 6px 0 0; color: #91a0b9; font-size: 10px; line-height: 1.45; }
+.cascade-controls { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(167,139,250,.14); }
+.cascade-controls > div { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.cascade-controls > div > span { margin-right: 3px; color: #746b99; font-family: "Space Grotesk", sans-serif; font-size: 8px; letter-spacing: .1em; }
+.cascade-controls button { padding: 5px 7px; border: 1px solid rgba(142,170,199,.16); border-radius: 4px; color: #8da0b6; background: rgba(12,23,38,.6); font-family: "Space Grotesk", sans-serif; font-size: 9px; }
+.cascade-controls button:hover, .cascade-controls button.active { border-color: rgba(167,139,250,.58); color: #eee9ff; background: rgba(167,139,250,.14); }
+.cascade-list { display: grid; gap: 7px; margin-top: 13px; max-height: 270px; overflow: auto; }
+.cascade-row { display: flex; flex-direction: column; gap: 5px; width: 100%; padding: 9px 10px; border: 1px solid rgba(142,170,199,.13); border-radius: 5px; color: inherit; background: rgba(7,16,28,.45); text-align: left; transition: .16s ease; }
+.cascade-row:hover { border-color: rgba(167,139,250,.5); background: rgba(167,139,250,.08); transform: translateX(2px); }
+.cascade-row-top { display: flex; align-items: center; justify-content: space-between; }
+.cascade-row strong { overflow: hidden; color: #e5e8f7; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.cascade-row > span:last-child { overflow: hidden; color: #7e91a9; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.cascade-hop { font-family: "Space Grotesk", sans-serif; font-size: 8px; letter-spacing: .08em; }.cascade-hop.direct { color: #55d6d1; }.cascade-hop.indirect { color: #c1adff; }
+.cascade-empty { display: flex; align-items: center; flex-direction: column; gap: 6px; padding: 22px 12px 10px; color: #7d8ca5; text-align: center; }.cascade-empty svg { color: #a78bfa; }.cascade-empty strong { color: #cbd1e5; font-size: 11px; font-weight: 500; }.cascade-empty span { font-size: 10px; }
+@media (max-width: 650px) { .cascade-panel { margin-left: 0; margin-right: 0; }.cascade-controls { flex-direction: column; }.spotlight-action { padding-left: 6px; padding-right: 6px; } }
+.trace-node-cascade { border-color: rgba(167,139,250,.62) !important; box-shadow: 0 0 0 1px rgba(167,139,250,.22), 0 0 18px rgba(167,139,250,.16) !important; }
