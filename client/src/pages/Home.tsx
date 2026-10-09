@@ -147,7 +147,7 @@ export default function Home() {
   const runInvestigation = useCallback(async (value?: string) => {
     const nextQuery = (value ?? query).trim(); if (!nextQuery) return; setQuery(nextQuery); setError(""); setNotice(""); setInvestigation(null); setIsLoading(true); setProgress(0); setEvidenceFilter("All");
     for (let index = 0; index < steps.length; index += 1) { await new Promise(resolve => window.setTimeout(resolve, 280)); setProgress(index + 1); }
-    try { const response = await api("/api/investigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: nextQuery }) }); const payload = await response.json(); if (!response.ok) throw new Error(payload.message || "Investigation unavailable"); setInvestigation(payload); setSpotlight(null); setActiveView("graph"); await refreshRecent(); } catch (caught) { setError(caught instanceof Error ? caught.message : "The investigation could not be completed."); } finally { setIsLoading(false); }
+    try { const response = await api("/api/investigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: nextQuery }) }); const payload = await response.json(); if (!response.ok) throw new Error(payload.detail || payload.message || "Investigation unavailable"); setInvestigation(payload); setSpotlight(null); setActiveView("graph"); await refreshRecent(); } catch (caught) { setError(caught instanceof Error ? caught.message : "The investigation could not be completed."); } finally { setIsLoading(false); }
   }, [api, query, refreshRecent]);
 
   const showPreview = () => { setError(""); setQuery(previewInvestigation.query); setInvestigation(previewInvestigation); setSpotlight(null); setActiveView("graph"); };

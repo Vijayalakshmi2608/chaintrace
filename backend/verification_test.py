@@ -161,6 +161,33 @@ async def run() -> None:
             assert malformed_relationships == []
             assert "malformed relationship response" in (malformed_notice or "")
             main.httpx.AsyncClient = original_client
+
+            class JsonResponse:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self.payload = payload
+
+                def raise_for_status(self) -> None:
+                    return None
+
+                def json(self) -> dict[str, object]:
+                    return self.payload
+
+            class JsonClient:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self.payload = payload
+
+                async def get(self, *_args: object, **_kwargs: object) -> JsonResponse:
+                    return JsonResponse(self.payload)
+
+            empty_response = JsonClient({"error": "Google News hasn't returned any results for this query."})
+            empty_results = await original_serp(empty_response, "no results", "google_news")
+            assert empty_results == []
+            try:
+                await original_serp(JsonClient({"error": "Invalid API key"}), "provider error", "google")
+            except main.HTTPException as exc:
+                assert exc.status_code == 502 and "Invalid API key" in str(exc.detail)
+            else:
+                raise AssertionError("provider errors must be surfaced")
         finally:
             main.serp_search, main.extract_relationships = original_serp, original_extract
 

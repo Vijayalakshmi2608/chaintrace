@@ -164,6 +164,15 @@ async def serp_search(client: httpx.AsyncClient, query: str, engine: str) -> lis
         response = await client.get("https://serpapi.com/search.json", params=params)
         response.raise_for_status()
         payload = response.json()
+        if isinstance(payload, dict) and payload.get("error"):
+            provider_error = compact(payload["error"], 180)
+            # SerpApi uses the error field for a valid zero-result search too.
+            # That is an empty vertical, not an upstream failure.
+            if re.search(r"hasn't returned any results|no results", provider_error, re.IGNORECASE):
+                return []
+            raise HTTPException(502, f"SerpApi {engine} error: {provider_error}")
+    except httpx.TimeoutException as exc:
+        raise HTTPException(504, f"SerpApi {engine} request timed out") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"SerpApi request failed: {exc.__class__.__name__}") from exc
     result_key = {
@@ -178,7 +187,9 @@ async def serp_search(client: httpx.AsyncClient, query: str, engine: str) -> lis
 async def collect_vertical(client: httpx.AsyncClient, query: str, source_type: str) -> tuple[str, list[dict[str, Any]], str | None]:
     engine = VERTICAL_ENGINES[source_type]
     try:
-        return source_type, await asyncio.wait_for(serp_search(client, query, engine), timeout=15), None
+        # Google Search can legitimately take 20+ seconds for broad dependency
+        # queries. Keep a bounded request window without dropping valid evidence.
+        return source_type, await asyncio.wait_for(serp_search(client, query, engine), timeout=40), None
     except HTTPException as exc:
         logger.warning("SerpApi vertical failed source_type=%s status=%s", source_type, exc.status_code)
         return source_type, [], str(exc.detail)
@@ -407,7 +418,7 @@ async def investigate(request: InvestigationRequest) -> dict[str, Any]:
         raise HTTPException(503, "SERPAPI_API_KEY is not configured")
     routed_verticals = route_verticals(query)
     logger.info("cache MISS query_hash=%s; routed SerpApi verticals=%s", query_hash(query), ",".join(routed_verticals))
-    async with httpx.AsyncClient(timeout=12) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(40.0, connect=10.0)) as client:
         collected = await asyncio.gather(*(collect_vertical(client, query, source_type) for source_type in routed_verticals))
     evidence = deduplicate_evidence([
         record
